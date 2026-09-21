@@ -35,5 +35,4 @@ class SttService:
             return {"transcript": "", "answer": ""}
 
         answer = await self.llm_service.llm_response(transcript)
-        print('answer  from llm in stt' , answer)
         return {"transcript": transcript, "answer": answer}

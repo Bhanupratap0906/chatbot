@@ -20,6 +20,10 @@ load_dotenv()
 router = APIRouter(tags=["Realtime"])
 
 
+# Must match INPUT_SAMPLE_RATE in the frontend (index.html), which forces its
+# AudioContext to this rate before sending PCM here. If the two ever drift
+# apart, Deepgram will get PCM at the wrong rate and transcripts will be
+# empty or garbled even though the pipeline "looks" connected end to end.
 INPUT_SAMPLE_RATE = 16000
 
 # Cancel a turn when the caller talks over the assistant. Leave this off until
@@ -369,7 +373,18 @@ async def voice_socket(ws: WebSocket):
         await ws.close(code=1011, reason="DEEPGRAM_API_KEY is not configured")
         return
 
-    dg = await _connect_deepgram(api_key)
+    try:
+        dg = await _connect_deepgram(api_key)
+    except Exception as error:
+        # Previously this raised uncaught, closing the socket with no
+        # reason and no log line — from the browser it looked identical
+        # to "connected but nothing happened". Now it's explicit.
+        
+        await ws.close(code=1011, reason="Failed to connect to speech-to-text service")
+        return
+
+   
+
     session = VoiceSession(ws, dg)
 
     await ws.send_json(
@@ -386,7 +401,8 @@ async def voice_socket(ws: WebSocket):
         asyncio.create_task(session.pump_deepgram()),
         asyncio.create_task(session.keepalive()),
     ]
-     # Runs once and finishes on its own — must not be in the FIRST_COMPLETED
+
+    # Runs once and finishes on its own — must not be in the FIRST_COMPLETED
     # race above, or the session tears down the instant the greeting ends.
     asyncio.create_task(session.send_greeting())
 
@@ -416,3 +432,5 @@ async def voice_socket(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+        print("[ws] /ws/voice connection closed")
