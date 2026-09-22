@@ -89,6 +89,42 @@
       transition: 0.2s;
     }
 
+    .sip-credentials {
+      text-align: left;
+      margin-bottom: 10px;
+    }
+
+    .input-group {
+      margin-top: 14px;
+    }
+
+    .input-group label {
+      display: block;
+      font-size: 13px;
+      color: #8d8da5;
+      margin-bottom: 7px;
+    }
+
+    .input-group input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: #e2e2f0;
+      outline: none;
+      font-size: 14px;
+    }
+
+    .input-group input:focus {
+      border-color: rgba(139, 92, 246, 0.7);
+      box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.12);
+    }
+
+    .input-group input::placeholder {
+      color: #66667a;
+    }
+
     #sipRegisterBtn {
       color: white;
       background: linear-gradient(135deg, #6366f1, #8b5cf6);
@@ -187,6 +223,38 @@
       Incoming SIP calls are automatically answered by AI.
     </div>
 
+    <div class="sip-credentials">
+      <div class="input-group">
+        <label for="sipDomain">SIP Domain</label>
+        <input
+          type="text"
+          id="sipDomain"
+          placeholder="Enter SIP domain"
+          autocomplete="off"
+        >
+      </div>
+
+      <div class="input-group">
+        <label for="sipUsername">SIP Username</label>
+        <input
+          type="text"
+          id="sipUsername"
+          placeholder="Enter SIP username"
+          autocomplete="username"
+        >
+      </div>
+
+      <div class="input-group">
+        <label for="sipPassword">SIP Password</label>
+        <input
+          type="password"
+          id="sipPassword"
+          placeholder="Enter SIP password"
+          autocomplete="current-password"
+        >
+      </div>
+    </div>
+
     <button id="sipRegisterBtn">
       Start SIP
     </button>
@@ -246,10 +314,12 @@
        CONFIGURATION
     ========================================================= */
 
-    const SIP_DOMAIN = "cl001lc001.com";
     const SIP_WS = "wss://sip.begindaily.in:7443/";
-    const SIP_USERNAME = "113";
-    const SIP_PASSWORD = "a2a349f0";
+
+    // SIP credentials are entered by the user before registration.
+    let SIP_DOMAIN = "";
+    let SIP_USERNAME = "";
+    let SIP_PASSWORD = "";
 
     // Sample rate of the PCM sent to the backend. Must match INPUT_SAMPLE_RATE
     // in modules/realtime, because Deepgram's /v1/listen connection there is
@@ -285,6 +355,9 @@
     ========================================================= */
 
     const registerBtn = document.getElementById("sipRegisterBtn");
+    const sipDomainInput = document.getElementById("sipDomain");
+    const sipUsernameInput = document.getElementById("sipUsername");
+    const sipPasswordInput = document.getElementById("sipPassword");
     const testBtn = document.getElementById("testBtn");
     const hangupBtn = document.getElementById("hangupBtn");
     const remoteAudio = document.getElementById("remoteAudio");
@@ -1464,6 +1537,22 @@
     ========================================================= */
 
     registerBtn.onclick = async () => {
+      /*
+       * Read SIP credentials only when the user clicks Start SIP.
+       * No SIP connection is created before this point.
+       */
+      SIP_DOMAIN = sipDomainInput.value.trim();
+      SIP_USERNAME = sipUsernameInput.value.trim();
+      SIP_PASSWORD = sipPasswordInput.value;
+
+      if (!SIP_DOMAIN || !SIP_USERNAME || !SIP_PASSWORD) {
+        setStatus("Please enter SIP domain, username, and password.", "error");
+        return;
+      }
+
+      registerBtn.disabled = true;
+      setStatus("Validating SIP credentials...");
+
       /* Create + resume the AudioContext inside the click so the browser
          allows it to keep running when a call arrives later. */
       try {
@@ -1473,6 +1562,14 @@
       }
 
       await initializeSIP();
+
+      /*
+       * initializeSIP() enables/disables the button after successful
+       * registration. Re-enable it if registration failed.
+       */
+      if (!isRegistered) {
+        registerBtn.disabled = false;
+      }
     };
 
     testBtn.onclick = async () => {
