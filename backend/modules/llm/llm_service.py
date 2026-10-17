@@ -1,13 +1,27 @@
-import os
+"""Groq LLM assistant (SRP + DIP + OCP + LSP).
 
-from dotenv import load_dotenv
-from langchain_core.messages import ToolMessage
+* ``LLMresponse`` implements ``LlmAssistant`` and only orchestrates:
+  guardrail -> tool-check -> plain stream | tool execute -> final stream.
+* Guardrail, tool executor, model client and system prompt are injected
+  (DIP), so each can be faked/substituted (LSP) and new tools added via
+  the registry without editing this file (OCP).
+* Chunking, error classification and message formatting live in their own
+  modules (SRP).
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Optional
+
 from langchain_groq import ChatGroq
 
-from modules.llm.guard_rail import check_guardrail
-from modules.tools.appointment import book_appointment
+from modules.common.protocols import Guardrail, LlmAssistant
+from modules.common.settings import get_settings
+from modules.llm.errors import is_tool_validation_error
+from modules.llm.guard_rail import RegexInjectionGuardrail
+from modules.llm.tool_executor import ToolExecutor
 
-load_dotenv()
 
 SYSTEM_PROMPT = """
 You are a friendly and professional AI voice assistant for a dental clinic.
@@ -42,140 +56,112 @@ Appointment rules:
 - Ask for missing information one piece at a time.
 - Before booking, repeat the appointment details and ask the patient to confirm.
 - Only call the booking tool after the patient has explicitly confirmed the details.
+- Never call the booking tool with missing, empty, or placeholder details.
+  If any of the three is unknown, ask the patient for it instead of calling the tool.
 
 You are having a real-time phone conversation, so keep responses short and natural.
 """
 
 
+OUT_OF_SCOPE_REPLY = (
+    "I'm here to help with dental clinic questions "
+    "and appointments. How can I help you?"
+)
+
+
 def _as_text(content) -> str:
     if isinstance(content, str):
         return content
-
     if isinstance(content, list):
         parts = []
-
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
             elif isinstance(block, dict):
                 parts.append(block.get("text", ""))
-
         return "".join(parts)
-
     return str(content or "")
 
 
-class LLMresponse:
+async def _stream_plain(llm, messages):
+    """Stream a normal (no-tool) reply."""
+    async for chunk in llm.astream(messages):
+        piece = _as_text(chunk.content)
+        if piece:
+            yield piece
 
-    def __init__(self):
-        self.model = os.getenv(
-            "GROQ_MODEL",
-            "openai/gpt-oss-20b",
-        )
 
-        self.llm = ChatGroq(
+class LLMresponse(LlmAssistant):
+    def __init__(
+        self,
+        model: str | None = None,
+        llm=None,
+        guardrail: Guardrail | None = None,
+        tool_executor: ToolExecutor | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
+    ):
+        settings = get_settings()
+        self.model = model or settings.groq_model
+        self.system_prompt = system_prompt
+        self.guardrail = guardrail or RegexInjectionGuardrail()
+        self.tool_executor = tool_executor or ToolExecutor()
+        self.llm = llm or ChatGroq(
             model=self.model,
             temperature=0,
             max_retries=0,
             timeout=15,
         )
-
-        self.llm_with_tools = self.llm.bind_tools(
-            [book_appointment]
-        )
-
+        # OCP: bind whatever the registry currently holds.
+        self.llm_with_tools = self.llm.bind_tools(self.tool_executor.tools)
         print(f"[llm] using {self.model}")
 
-    async def stream(self, text: str, history=None):
-        allowed = check_guardrail(text)  # no longer async, no LLM call
-
-        if not allowed:
-            yield (
-                "I'm here to help with dental clinic questions "
-                "and appointments. How can I help you?"
-            )
-            return
-
-        messages = [("system", SYSTEM_PROMPT)]
+    def _messages(self, text: str, history=None) -> list:
+        messages = [("system", self.system_prompt)]
         messages += history or []
         messages.append(("human", text))
+        return messages
+
+    async def stream(self, text: str, history: Optional[list] = None) -> AsyncIterator[str]:
+        if not self.guardrail.is_allowed(text):
+            yield OUT_OF_SCOPE_REPLY
+            return
+
+        messages = self._messages(text, history)
 
         try:
-            # First call checks whether the LLM needs a tool.
-            response = await self.llm_with_tools.ainvoke(messages)
-
-            # ---------------------------------------------------------
-            # NORMAL CONVERSATION
-            # ---------------------------------------------------------
+            try:
+                response = await self.llm_with_tools.ainvoke(messages)
+            except Exception as error:
+                if is_tool_validation_error(error):
+                    print(
+                        f"[llm] provider rejected the tool call ({error!r}) — "
+                        "falling back to a normal reply"
+                    )
+                    async for piece in _stream_plain(self.llm, messages):
+                        yield piece
+                    return
+                raise
 
             if not response.tool_calls:
-                async for chunk in self.llm.astream(messages):
-                    piece = _as_text(chunk.content)
-
-                    if piece:
-                        yield piece
-
+                async for piece in _stream_plain(self.llm, messages):
+                    yield piece
                 return
 
-            # ---------------------------------------------------------
-            # APPOINTMENT / TOOL CALL
-            # ---------------------------------------------------------
-
             messages.append(response)
-
-            for tool_call in response.tool_calls:
-
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-
-                print(f"[tool] name: {tool_name}")
-                print(f"[tool] args: {tool_args}")
-
-                if tool_name == "book_appointment":
-
-                    tool_result = await book_appointment.ainvoke(
-                        tool_args
-                    )
-
-                    print(f"[tool] result: {tool_result}")
-
-                    messages.append(
-                        ToolMessage(
-                            content=str(tool_result),
-                            tool_call_id=tool_call["id"],
-                        )
-                    )
-
-            # ---------------------------------------------------------
-            # STREAM FINAL RESPONSE AFTER TOOL COMPLETES
-            # ---------------------------------------------------------
+            await self.tool_executor.execute(response, messages)
 
             async for chunk in self.llm.astream(messages):
                 piece = _as_text(chunk.content)
-
                 if piece:
                     yield piece
 
         except Exception as error:
-            print(
-                f"[llm] {self.model} failed: {error!r}"
-            )
+            print(f"[llm] {self.model} failed: {error!r}")
             raise
 
     async def llm_response(self, text: str, history=None) -> str:
-        """
-        Compatibility helper.
-
-        Collects the streamed response into one string.
-
-        Use `stream()` when you actually want to send
-        chunks to the client.
-        """
-
+        """Collect the streamed response into one string."""
         response = []
-
         async for piece in self.stream(text, history):
             response.append(piece)
-
         return "".join(response)
-
