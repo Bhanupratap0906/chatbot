@@ -12,27 +12,33 @@ from collections.abc import Iterable
 
 from deepgram import DeepgramClient
 
-from modules.common.protocols import AudioGenerator
+from modules.common.costs import ConversationCostTracker
 from modules.common.settings import get_settings
 
 
-class DeepgramAudioGenerator(AudioGenerator):
+class DeepgramAudioGenerator:
+    """Request speech audio from Deepgram and yield its PCM chunks."""
+
     def __init__(
         self,
         client: DeepgramClient | None = None,
         sample_rate: int | None = None,
         api_key: str | None = None,
+        cost_tracker: ConversationCostTracker | None = None,
     ):
+        """Configure the Deepgram client and output sample rate."""
         settings = get_settings()
         resolved_key = api_key if api_key is not None else settings.deepgram_api_key
         if not resolved_key and client is None:
             raise ValueError("DEEPGRAM_API_KEY is not configured")
         self._client = client or DeepgramClient(api_key=resolved_key)
         self._sample_rate = sample_rate if sample_rate is not None else settings.tts_sample_rate
+        self._cost_tracker = cost_tracker
         # Set once we know which kwargs this account/SDK actually accepts.
         self._raw_pcm_supported: bool | None = None
 
     def _generate_raw(self, text: str, voice: str, raw: bool):
+        """Request either raw PCM or WAV fallback audio from Deepgram."""
         if raw:
             return self._client.speak.v2.audio.generate(
                 text=text,
@@ -48,11 +54,10 @@ class DeepgramAudioGenerator(AudioGenerator):
             container="wav",
         )
 
-    def generate(self, text: str, voice: str, raw: bool) -> Iterable[bytes]:
-        return self._generate_raw(text, voice, raw)
-
     def iter_chunks(self, text: str, voice: str) -> Iterable[bytes]:
         """Blocking generator of linear16 chunks with WAV fallback."""
+        if self._cost_tracker is not None:
+            self._cost_tracker.add_tts_text(text, voice)
         if self._raw_pcm_supported is None:
             try:
                 response = self._generate_raw(text, voice, raw=True)

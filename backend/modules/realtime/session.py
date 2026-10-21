@@ -22,6 +22,7 @@ import time
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from modules.common.costs import ConversationCostTracker
 from modules.common.protocols import ChunkSplitter, ConversationHistory, LlmAssistant, MessagePublisher
 from modules.common.settings import Settings, get_settings
 from modules.llm.chunking import SentenceChunkSplitter
@@ -77,6 +78,7 @@ class TurnManager:
         settings: Settings,
         voice_provider,
     ):
+        """Store services and state required to process one assistant turn."""
         self._publisher = publisher
         self._llm = llm
         self._tts = tts
@@ -117,6 +119,7 @@ class TurnManager:
         voice = self._voice_provider()
 
         async def send_with_log(chunk: bytes):
+            """Log the first audio chunk, then forward every chunk to the browser."""
             nonlocal first_logged
             if not first_logged:
                 first_logged = True
@@ -130,6 +133,7 @@ class TurnManager:
         started = time.perf_counter()
 
         def elapsed():
+            """Format elapsed turn time for latency logs."""
             return f"{time.perf_counter() - started:.2f}s"
 
         try:
@@ -202,14 +206,15 @@ class VoiceSession:
         self.voice = voice
 
         self._settings = settings or get_settings()
+        self.costs = ConversationCostTracker(self._settings)
         # DIP: concrete defaults keep old ``VoiceSession(ws, dg)`` working,
         # but tests/callers may inject fakes (LSP).
         if llm is None:
             from modules.llm.llm_service import LLMresponse
-            llm = LLMresponse()
+            llm = LLMresponse(cost_tracker=self.costs)
         if tts is None:
             from modules.tts.tts_service import TtsService
-            tts = TtsService()
+            tts = TtsService(cost_tracker=self.costs)
 
         self.llm = llm
         self.tts = tts
@@ -247,6 +252,9 @@ class VoiceSession:
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect()
             if message.get("bytes") is not None:
+                self.costs.add_stt_audio(
+                    len(message["bytes"]), self._settings.input_sample_rate
+                )
                 await self.dg.send(message["bytes"])
                 continue
             text = message.get("text")
@@ -333,11 +341,13 @@ class _SpeakerAdapter:
         started = time.perf_counter()
 
         def elapsed():
+            """Format greeting-audio elapsed time for latency logs."""
             return f"{time.perf_counter() - started:.2f}s"
 
         first_logged = False
 
         async def send_with_log(chunk: bytes):
+            """Log the first greeting audio chunk and forward it to the browser."""
             nonlocal first_logged
             if not first_logged:
                 first_logged = True

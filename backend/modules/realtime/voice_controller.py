@@ -19,7 +19,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from modules.common.settings import get_settings
 from modules.realtime.session import VoiceSession
 from modules.stt.connector import DeepgramRealtimeConnector
-from modules.stt.stt_service import INPUT_SAMPLE_RATE
 from modules.tts.voices import SAMPLE_RATE as TTS_SAMPLE_RATE
 from modules.tts.voices import VOICES
 
@@ -28,10 +27,11 @@ router = APIRouter(tags=["Realtime"])
 
 
 async def _run_session(ws: WebSocket, dg, session: VoiceSession) -> None:
+    """Run session pumps and guarantee cleanup; called after websocket setup succeeds."""
     await ws.send_json(
         {
             "type": "ready",
-            "inputSampleRate": INPUT_SAMPLE_RATE,
+            "inputSampleRate": session._settings.input_sample_rate,
             "ttsSampleRate": TTS_SAMPLE_RATE,
             "voices": VOICES,
         }
@@ -65,11 +65,13 @@ async def _run_session(ws: WebSocket, dg, session: VoiceSession) -> None:
             await ws.close()
         except Exception:
             pass
+        session.costs.print_summary()
         print("[ws] /ws/voice connection closed")
 
 
 @router.websocket("/ws/voice")
 async def voice_socket(ws: WebSocket):
+    """Handle a frontend live-call connection; FastAPI invokes this for ``/ws/voice``."""
     await ws.accept()
     settings = get_settings()
 

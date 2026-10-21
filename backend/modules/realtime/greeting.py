@@ -13,6 +13,8 @@ from modules.common.protocols import AsyncSpeaker, ConversationHistory, MessageP
 
 
 class GreetingService:
+    """Send the configured welcome text and speech once at call start."""
+
     def __init__(
         self,
         publisher: MessagePublisher,
@@ -21,6 +23,7 @@ class GreetingService:
         greeting_text: str,
         voice: str,
     ):
+        """Store the socket publisher, speaker, history, greeting, and selected voice."""
         self._publisher = publisher
         self._speaker = speaker
         self._history = history
@@ -28,9 +31,11 @@ class GreetingService:
         self._voice = voice
 
     async def send(self) -> None:
+        """Publish and speak the greeting; launched by the websocket session setup."""
         started = time.perf_counter()
 
         def elapsed():
+            """Format elapsed greeting time for diagnostic logs."""
             return f"{time.perf_counter() - started:.2f}s"
 
         try:

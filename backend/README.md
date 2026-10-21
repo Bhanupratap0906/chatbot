@@ -292,9 +292,8 @@ flowchart TD
         Speak --> TTSSpeak[TtsService.speak text, voice, callback]
         TTSSpeak --> ValidateTTS[TtsService._validate text and voice]
         ValidateTTS --> AsyncSpeaker[ThreadedAsyncSpeaker.speak]
-        AsyncSpeaker --> Producer[Worker thread iterates TtsService.stream]
-        Producer --> ValidateStream[TtsService._validate]
-        ValidateStream --> IterateAudio[DeepgramAudioGenerator.iter_chunks]
+        AsyncSpeaker --> Producer[Worker thread iterates DeepgramAudioGenerator.iter_chunks]
+        Producer --> IterateAudio[Yield PCM audio chunks]
         IterateAudio --> RawProbe{Raw PCM request supported?}
         RawProbe -- Unknown --> RawGenerate[DeepgramAudioGenerator._generate_raw raw PCM]
         RawGenerate --> RawAccepted{Provider accepts raw PCM?}
@@ -367,24 +366,13 @@ flowchart TD
 - A turn error is reported to the browser and does not itself close the call.
   The call cleanup begins when a supervised client, Deepgram, or keepalive task
   finishes or fails.
-- The REST routes (`speech_to_text()` and `generate_audio()`) and scripts under
-  `scripts/` are separate entry points, not part of the `/ws/voice` lifecycle.
+- The live-call workflow uses `/ws/voice`; scripts under `scripts/` are separate
+  development utilities.
 
 ## Application entry and request routes
 
-- `main.py`
-  - `root()` is the `GET /` handler; FastAPI serves `static/index.html`.
-  - `start()` launches Uvicorn and is called by the `if __name__ == "__main__"`
-    entry point. The module creates the FastAPI app and registers the STT, TTS,
-    and realtime routers.
-- `modules/stt/stt_controller.py`
-  - `speech_to_text()` is called by FastAPI for `POST /stt/audio`. It reads the
-    upload, calls `FileTranscriber.transcribe()`, and, when there is a transcript,
-    calls `LlmAssistant.llm_response()` to produce an answer.
-- `modules/tts/tts_controller.py`
-  - `generate_audio()` is called by FastAPI for `GET /tts/audio`. It gets a
-    synthesizer through `get_tts()`, calls `text_to_speech()`, and returns WAV
-    bytes.
+- `main.py`: `start()` launches Uvicorn and is called by the `if __name__ ==
+  "__main__"` entry point. The app registers the live-call websocket route.
 - `modules/realtime/voice_controller.py`
   - `voice_socket()` is the FastAPI `/ws/voice` websocket handler. It validates
     settings, connects to Deepgram, creates `VoiceSession`, then calls
@@ -392,35 +380,25 @@ flowchart TD
   - `_run_session()` sends the client configuration and supervises the session's
     client-audio, Deepgram-audio, and keepalive tasks; it then closes resources.
 
-## Shared settings and dependency wiring
+## Shared settings
 
 - `modules/common/settings.py`
   - `_load_env_once()` loads environment files at import time.
   - `_as_bool()` converts environment strings to booleans; `Settings` reads the
     application's configuration; `get_settings()` creates and caches one
     settings object. Controllers and services use `get_settings()` directly.
-- `modules/common/dependencies.py`
-  - `get_tts()` and `get_llm()` return cached service instances to REST handlers
-    and other consumers using FastAPI `Depends`.
-  - `get_file_transcriber()` constructs the implementation injected into the
-    STT REST route.
-- `modules/common/protocols.py` defines the abstract interfaces implemented by
-  services and accepted by controllers. These classes are contracts, not runtime
-  entry points; dependency providers supply their concrete implementations.
-- `modules/common/__init__.py` is the package marker; it has no runtime function.
+- `modules/common/protocols.py` defines the small interfaces used for injectable
+  conversation services.
 
 ## Speech recognition (STT)
 
-- `modules/stt/stt_service.py`
-  - `_default_input_rate()` gets the configured input sample rate.
-  - `DeepgramFileTranscriber.transcribe()` is called by the `POST /stt/audio`
-    handler to send uploaded audio to Deepgram and return recognized text.
 - `modules/stt/connector.py`
   - `build_listen_url()` builds the Deepgram streaming URL and is used by
     `DeepgramRealtimeConnector.connect()`.
   - `DeepgramRealtimeConnector.connect()` establishes the streaming connection
     used by `voice_socket()`.
-  - The websocket route uses `DeepgramRealtimeConnector` directly.
+  - The websocket route uses `DeepgramRealtimeConnector` directly. The input
+    sample rate is supplied by `Settings` and shared with the frontend.
 
 ## Realtime conversation
 
@@ -454,7 +432,7 @@ flowchart TD
   - `LLMresponse._messages()` combines the system prompt, history, and user
     input. `LLMresponse.stream()` is called by realtime turns and
     `llm_response()`; `llm_response()` collects that stream into a string for
-    REST STT's optional answer.
+    callers that need a non-streaming response.
 - `modules/llm/guard_rail.py`: `RegexInjectionGuardrail` checks requests before
   they reach the model. `LLMresponse.stream()` calls its `is_allowed()` method;
   `RegexInjectionGuardrail.is_allowed()` is called by `LLMresponse.stream()`.
@@ -479,8 +457,7 @@ flowchart TD
 ## Text-to-speech (TTS)
 
 - `modules/tts/tts_service.py`: `TtsService` composes audio generation,
-  chunking, and streaming/speaker support. REST `generate_audio()` calls its
-  full-text synthesis method; realtime turns call its streaming methods.
+  chunking, and streaming/speaker support used by realtime turns.
 - `modules/tts/generator.py`: `DeepgramAudioGenerator` calls the speech provider
   to generate audio; `TtsService` uses it for speech output.
 - `modules/tts/speaker.py`: `ThreadedAsyncSpeaker` adapts blocking audio playback
@@ -507,4 +484,3 @@ flowchart TD
 - `uv.lock` pins resolved dependencies for reproducible installs.
 - `src/backend/__init__.py` marks the optional `backend` package namespace;
   the runnable application entry point is `main.py`.
-- `static/index.html` is the document returned by `root()`.

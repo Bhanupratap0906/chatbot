@@ -25,6 +25,7 @@ TOOL_REGISTRY: list = []
 
 
 def _missing_message(missing: list[str]) -> str:
+    """Format a prompt for absent booking details; used by the booking handler."""
     return (
         "Cannot book yet — still missing: "
         + ", ".join(missing)
@@ -46,6 +47,7 @@ def make_booking_handler(
         appointment_date: Optional[str] = None,
         appointment_time: Optional[str] = None,
     ) -> str:
+        """Validate booking details then persist them; called by the LangChain booking tool."""
         missing = val.missing_fields(patient_name, appointment_date, appointment_time)
         if missing:
             return _missing_message(missing)

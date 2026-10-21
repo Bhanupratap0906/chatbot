@@ -28,6 +28,7 @@ class LoggingAppointmentRepository(IAppointmentRepository):
     """
 
     async def book(self, patient_name: str, appointment_date: str, appointment_time: str) -> str:
+        """Log and confirm a booking; called by the appointment handler after validation."""
         name = patient_name.strip()
         date = appointment_date.strip()
         time = appointment_time.strip()
@@ -44,6 +45,7 @@ class StrictAppointmentValidator(IAppointmentValidator):
     """SRP: only decides which required fields are missing."""
 
     def __init__(self, required: tuple[str, ...] = REQUIRED_FIELDS):
+        """Set required booking fields; used when constructing the booking handler."""
         self._required = required
 
     def missing_fields(
@@ -52,6 +54,7 @@ class StrictAppointmentValidator(IAppointmentValidator):
         appointment_date: Optional[str],
         appointment_time: Optional[str],
     ) -> list[str]:
+        """Return empty or missing field names; called before the repository books an appointment."""
         values = {
             "patient_name": patient_name,
             "appointment_date": appointment_date,
@@ -69,8 +72,10 @@ _DEFAULT_VALIDATOR = StrictAppointmentValidator()
 
 
 def get_default_repository() -> IAppointmentRepository:
+    """Return the shared booking repository; used by the default appointment handler."""
     return _DEFAULT_REPOSITORY
 
 
 def get_default_validator() -> IAppointmentValidator:
+    """Return the shared field validator; used by the default appointment handler."""
     return _DEFAULT_VALIDATOR

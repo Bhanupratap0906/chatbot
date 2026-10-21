@@ -18,7 +18,10 @@ from langchain_core.messages import ToolMessage
 
 
 class ToolExecutor:
+    """Dispatch model-requested tools and append their results to the LLM messages."""
+
     def __init__(self, tools: list | None = None):
+        """Load registered clinic tools or use an explicitly supplied list."""
         # OCP: injectable registry; defaults to the clinic's registry.
         if tools is not None:
             self._tools = list(tools)
@@ -29,6 +32,7 @@ class ToolExecutor:
 
     @property
     def tools(self) -> list:
+        """Return registered tools; used to bind tools to the language model."""
         return list(self._tools)
 
     async def execute(self, response, messages: list) -> None:
@@ -62,6 +66,7 @@ class ToolExecutor:
             messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
     async def _run_booking(self, tool_call: dict, tool_args: dict[str, Any], messages: list) -> None:
+        """Validate required appointment fields and append the booking result to the model conversation."""
         missing = [
             field
             for field in ("patient_name", "appointment_date", "appointment_time")

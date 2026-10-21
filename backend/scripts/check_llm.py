@@ -10,6 +10,7 @@ from dotenv import load_dotenv, find_dotenv
 
 
 def main():
+    """Check Groq credentials, select an available model, and run a short streaming request."""
     dotenv_path = find_dotenv(usecwd=True)
     print(f".env path : {dotenv_path or '(not found)'}")
     load_dotenv(dotenv_path)
@@ -72,6 +73,7 @@ def main():
     llm = ChatGroq(model=chosen, temperature=0, max_retries=0, timeout=15)
 
     async def run():
+        """Measure first-token and total response time for the selected model."""
         start = time.perf_counter()
         first = None
         text  = ""
