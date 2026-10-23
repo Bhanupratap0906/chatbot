@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from modules.common.protocols import VoiceValidator
+from modules.common.backend_contracts import VoiceValidator
 
 
 VOICES = [

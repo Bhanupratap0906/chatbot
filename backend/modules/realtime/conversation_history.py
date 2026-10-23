@@ -7,11 +7,11 @@ itself (SRP). Window size is injectable (OCP).
 
 from __future__ import annotations
 
-from modules.common.protocols import ConversationHistory as IConversationHistory
+from modules.common.backend_contracts import ConversationHistory as IConversationHistory
 
 
-class InMemoryHistory(IConversationHistory):
-    """Keep a bounded conversation history for prompts; used by each live VoiceSession."""
+class InMemoryConversationHistory(IConversationHistory):
+    """Keep a bounded conversation history for prompts; used by each live RealtimeVoiceSession."""
 
     def __init__(self, window: int = 12):
         """Create an empty history retaining at most ``window`` messages."""
@@ -32,3 +32,11 @@ class InMemoryHistory(IConversationHistory):
         """Append assistant-only text; used to record the opening greeting."""
         self._items.append(("ai", text))
         self._items = self._items[-self._window:]
+
+    def replace_snapshot(self, messages: list) -> None:
+        """Replace turn history from a LangGraph conversation checkpoint."""
+        self._items = [
+            ("human" if getattr(message, "type", "") == "human" else "ai", message.content)
+            for message in messages
+            if getattr(message, "type", "") in ("human", "ai")
+        ][-self._window:]

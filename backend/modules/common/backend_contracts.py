@@ -75,7 +75,16 @@ class AppointmentRepository(ABC):
     """SRP: persistence only. Business rules live in the validator/use-case."""
 
     @abstractmethod
-    async def book(self, patient_name: str, appointment_date: str, appointment_time: str) -> str:
+    async def book(
+        self,
+        patient_name: str,
+        appointment_date: str,
+        appointment_time: str,
+        mobile_number: str,
+        *,
+        provider: Optional[str] = None,
+        service: Optional[str] = None,
+    ) -> str:
         """Persist an appointment and return a result for the assistant to report."""
 
 
@@ -83,8 +92,13 @@ class AppointmentValidator(ABC):
     """Contract for identifying missing appointment details."""
 
     @abstractmethod
-    def missing_fields(self, patient_name: Optional[str], appointment_date: Optional[str],
-                        appointment_time: Optional[str]) -> list[str]:
+    def missing_fields(
+        self,
+        patient_name: Optional[str],
+        appointment_date: Optional[str],
+        appointment_time: Optional[str],
+        mobile_number: Optional[str],
+    ) -> list[str]:
         """Return the required booking fields that are empty or absent."""
 
 

@@ -1,17 +1,20 @@
 """Prompt-injection guardrail (SRP + OCP + DIP).
 
-* ``Guardrail`` protocol lives in ``modules.common.protocols``.
+* ``Guardrail`` protocol lives in ``modules.common.backend_contracts``.
 * ``RegexInjectionGuardrail`` is one implementation; add new checks by
   adding a new class or new patterns list — no edits to LLM code (OCP).
 * LLM depends on the ``Guardrail`` ABC, not this concrete class (DIP).
-* ``LLMresponse`` uses this implementation through its ``Guardrail`` interface.
+* ``GroqLlmAssistant`` uses this implementation through its ``Guardrail`` interface.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
-from modules.common.protocols import Guardrail
+from modules.common.backend_contracts import Guardrail
+
+logger = logging.getLogger("guardrail")
 
 
 INJECTION_PATTERNS = [
@@ -43,6 +46,6 @@ class RegexInjectionGuardrail(Guardrail):
     def is_allowed(self, text: str) -> bool:
         """Allow ordinary input and reject detected injection; called before the LLM request."""
         if self.is_injection(text):
-            print("[guardrail] prompt injection detected")
+            logger.warning("prompt injection detected: %r", text)
             return False
         return True

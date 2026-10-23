@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 from modules.common.settings import Settings
+
+logger = logging.getLogger("cost")
 
 
 class ConversationCostTracker:
@@ -31,9 +34,8 @@ class ConversationCostTracker:
         cost = characters * self._settings.deepgram_tts_price_per_thousand_chars / 1000
         self.tts_characters += characters
         self._tts_cost += cost
-        print(
-            f"[cost] TTS request model={model} chars={characters} "
-            f"estimated=${cost:.8f}"
+        logger.info(
+            "TTS request model=%s chars=%d estimated=$%.8f", model, characters, cost
         )
 
     def add_llm_usage(self, usage: Mapping, model: str) -> None:
@@ -59,10 +61,9 @@ class ConversationCostTracker:
         self.llm_cached_input_tokens += cached_tokens
         self.llm_output_tokens += output_tokens
         self.llm_cost += request_cost
-        print(
-            f"[cost] LLM request model={model} input_tokens={input_tokens} "
-            f"(cached={cached_tokens}) output_tokens={output_tokens} "
-            f"estimated=${request_cost:.8f}"
+        logger.info(
+            "LLM request model=%s input_tokens=%d (cached=%d) output_tokens=%d estimated=$%.8f",
+            model, input_tokens, cached_tokens, output_tokens, request_cost,
         )
 
     def print_summary(self) -> None:
@@ -70,13 +71,11 @@ class ConversationCostTracker:
         stt_minutes = self.stt_audio_seconds / 60
         stt_cost = stt_minutes * self._settings.deepgram_stt_price_per_minute
         total = stt_cost + self._tts_cost + self.llm_cost
-        print(
-            "[cost] conversation summary "
-            f"STT={self.stt_audio_seconds:.2f}s/${stt_cost:.8f} "
-            f"TTS={self.tts_characters} chars/${self._tts_cost:.8f} "
-            f"LLM={self._llm_requests} requests, "
-            f"input={self.llm_input_tokens} tokens "
-            f"(cached={self.llm_cached_input_tokens}), "
-            f"output={self.llm_output_tokens} tokens/${self.llm_cost:.8f} "
-            f"TOTAL=${total:.8f}"
+        logger.info(
+            "conversation summary STT=%.2fs/$%.8f TTS=%d chars/$%.8f "
+            "LLM=%d requests, input=%d tokens (cached=%d), output=%d tokens/$%.8f TOTAL=$%.8f",
+            self.stt_audio_seconds, stt_cost,
+            self.tts_characters, self._tts_cost,
+            self._llm_requests, self.llm_input_tokens, self.llm_cached_input_tokens,
+            self.llm_output_tokens, self.llm_cost, total,
         )

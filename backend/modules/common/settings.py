@@ -61,7 +61,8 @@ class Settings:
 
     barge_in: bool = field(default_factory=lambda: _as_bool(os.getenv("BARGE_IN"), False))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))
-    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "160")))
+    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "512")))
+    llm_max_retries: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "2")))
 
     default_voice: str = field(default_factory=lambda: os.getenv("DEFAULT_VOICE", "flux-hannah-en"))
     greeting_text: str = field(
@@ -71,6 +72,33 @@ class Settings:
         )
     )
     history_window: int = field(default_factory=lambda: int(os.getenv("HISTORY_WINDOW", "8")))
+    clinic_timezone: str = field(default_factory=lambda: os.getenv("CLINIC_TIMEZONE", "Asia/Kolkata"))
+    no_answer_timeout: float = field(default_factory=lambda: float(os.getenv("NO_ANSWER_TIMEOUT", "10")))
+
+    # Customer portal (Daily) API — login page hands credentials to the
+    # backend, which exchanges them for the portal JWT and mirrors it into
+    # a chatbot-domain cookie (see modules/portal/). The active locationId
+    # is read from the JWT session (modules/portal/session.py); the
+    # PORTAL_LOCATION_ID below is only a last-resort override.
+    portal_base_build_portal_url: str = field(
+        default_factory=lambda: os.getenv("PORTAL_BASE_URL", "http://localhost:50001/api")
+    )
+    portal_timeout: float = field(default_factory=lambda: float(os.getenv("PORTAL_TIMEOUT", "15")))
+    portal_cookie_name: str = field(
+        default_factory=lambda: os.getenv("PORTAL_COOKIE_NAME", "portal_access_token")
+    )
+    portal_cookie_max_age: int = field(
+        default_factory=lambda: int(os.getenv("PORTAL_COOKIE_MAX_AGE", "86400"))
+    )
+    portal_location_id: str = field(
+        default_factory=lambda: os.getenv("PORTAL_LOCATION_ID", "")
+    )
+    portal_appointment_duration_minutes: int = field(
+        default_factory=lambda: int(os.getenv("PORTAL_APPOINTMENT_DURATION_MINUTES", "30"))
+    )
+    api_log_bodies: bool = field(
+        default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), True)
+    )
 
 
 @lru_cache(maxsize=1)

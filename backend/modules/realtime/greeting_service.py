@@ -7,9 +7,12 @@ interfaces (DIP/ISP), so it is unit-testable without websockets.
 
 from __future__ import annotations
 
+import logging
 import time
 
-from modules.common.protocols import AsyncSpeaker, ConversationHistory, MessagePublisher
+from modules.common.backend_contracts import AsyncSpeaker, ConversationHistory, MessagePublisher
+
+logger = logging.getLogger("greeting")
 
 
 class GreetingService:
@@ -39,15 +42,15 @@ class GreetingService:
             return f"{time.perf_counter() - started:.2f}s"
 
         try:
-            print("[turn] greeting")
+            logger.info("greeting start")
             await self._publisher.send_json({"type": "answer_start"})
             await self._publisher.send_json({"type": "token", "text": self._text})
             await self._speaker.speak(self._text, self._voice)
             self._history.add_ai(self._text)
             await self._publisher.send_json({"type": "answer_end"})
-            print(f"[turn] greeting done at {elapsed()}")
+            logger.info("greeting done at %s", elapsed())
         except Exception as error:
-            print(f"[turn] greeting failed at {elapsed()}: {error!r}")
+            logger.warning("greeting failed at %s: %r", elapsed(), error)
             try:
                 await self._publisher.send_json({"type": "answer_end"})
             except Exception:

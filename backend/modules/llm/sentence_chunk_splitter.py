@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from modules.common.protocols import ChunkSplitter
+from modules.common.backend_contracts import ChunkSplitter
 
 
 SENTENCE_END = re.compile(r"[\.\!\?](?=\s|$)")

@@ -8,12 +8,15 @@ facade don't need to know provider quirks (SRP). New providers implement
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from deepgram import DeepgramClient
 
-from modules.common.costs import ConversationCostTracker
+from modules.common.conversation_cost_tracker import ConversationCostTracker
 from modules.common.settings import get_settings
+
+logger = logging.getLogger("tts")
 
 
 class DeepgramAudioGenerator:
@@ -37,7 +40,7 @@ class DeepgramAudioGenerator:
         # Set once we know which kwargs this account/SDK actually accepts.
         self._raw_pcm_supported: bool | None = None
 
-    def _generate_raw(self, text: str, voice: str, raw: bool):
+    def _request_audio_from_deepgram(self, text: str, voice: str, raw: bool):
         """Request either raw PCM or WAV fallback audio from Deepgram."""
         if raw:
             return self._client.speak.v2.audio.generate(
@@ -54,13 +57,13 @@ class DeepgramAudioGenerator:
             container="wav",
         )
 
-    def iter_chunks(self, text: str, voice: str) -> Iterable[bytes]:
+    def generate_audio_chunks(self, text: str, voice: str) -> Iterable[bytes]:
         """Blocking generator of linear16 chunks with WAV fallback."""
         if self._cost_tracker is not None:
             self._cost_tracker.add_tts_text(text, voice)
         if self._raw_pcm_supported is None:
             try:
-                response = self._generate_raw(text, voice, raw=True)
+                response = self._request_audio_from_deepgram(text, voice, raw=True)
                 iterator = iter(response)
                 first = next(iterator)
                 self._raw_pcm_supported = True
@@ -74,9 +77,9 @@ class DeepgramAudioGenerator:
                 self._raw_pcm_supported = True
                 return
             except Exception as error:
-                print("Deepgram rejected raw PCM, falling back to WAV:", error)
+                logger.warning("Deepgram rejected raw PCM, falling back to WAV: %r", error)
                 self._raw_pcm_supported = False
 
-        for chunk in self._generate_raw(text, voice, raw=self._raw_pcm_supported):
+        for chunk in self._request_audio_from_deepgram(text, voice, raw=self._raw_pcm_supported):
             if chunk:
                 yield chunk

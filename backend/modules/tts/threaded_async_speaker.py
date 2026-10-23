@@ -1,6 +1,6 @@
 """Async bridge for blocking TTS generation (SRP).
 
-``ThreadedAsyncSpeaker`` only adapts a blocking chunk iterator onto the
+``ThreadedTextToSpeechSpeaker`` only adapts a blocking chunk iterator onto the
 event loop and strips a WAV header if the provider ignored
 ``container=none``. Validation and generation are injected (DIP), so this
 class never changes when voices or providers change (OCP).
@@ -9,10 +9,13 @@ class never changes when voices or providers change (OCP).
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable, Iterable
 
-class ThreadedAsyncSpeaker:
+logger = logging.getLogger("tts")
+
+class ThreadedTextToSpeechSpeaker:
     """Stream blocking audio generation without blocking the asyncio event loop."""
 
     def __init__(self, chunk_factory: Callable[[str, str], Iterable[bytes]]):
@@ -58,6 +61,6 @@ class ThreadedAsyncSpeaker:
                     sent += len(chunk)
                     await send_bytes(chunk)
             if sent == 0:
-                print(f"[tts] WARNING: no audio returned for {text!r}")
+                logger.warning("no audio returned for %r", text)
         finally:
             stop.set()

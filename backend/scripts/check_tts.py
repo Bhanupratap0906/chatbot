@@ -7,13 +7,13 @@ how long the first audio byte takes.
 import time
 import asyncio
 
-from modules.tts.tts_service import TtsService
+from modules.tts.text_to_speech_service import TextToSpeechService
 from modules.common.settings import get_settings
 
 
 async def main():
     """Smoke-test TTS streaming and report first-chunk latency; run manually when checking Deepgram TTS."""
-    tts = TtsService()
+    tts = TextToSpeechService()
 
     start = time.perf_counter()
     first = None
