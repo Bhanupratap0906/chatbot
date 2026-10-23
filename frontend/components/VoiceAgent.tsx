@@ -24,10 +24,14 @@ const DEBUG_INPUT_LEVEL = true;
 // has arrived.
 const NO_MEDIA_WARN_MS = 8000;
 
+const SIP_DOMAIN    = process.env.NEXT_PUBLIC_SIPDOMAIN;
+const SIP_USERNAME  = process.env.NEXT_PUBLIC_SIPUSERNAME;
+const SIP_PASSWORD  = process.env.NEXT_PUBLIC_SIPPASSWORD;
 // Logs inbound RTP byte counts 3s and 8s after answering.
 const DEBUG_MEDIA_STATS = true;
 
 function resolveVoiceWsUrl(): string {
+  /** Resolve the backend realtime endpoint; called when opening the AI socket. */
   // WHY: frontend served from different hosts/ports (dev :3000, prod Nginx).
   // WHAT: prefers NEXT_PUBLIC_VOICE_WS_URL override, else builds ws(s)://host/ws/voice
   // so browser always hits the FastAPI realtime endpoint on the same origin.
@@ -46,10 +50,11 @@ type Status = {
 };
 
 export function VoiceAgent() {
+  /** Manage SIP registration, the live-call WebSocket, audio routing, and call UI state. */
   /* ---------------- UI state ---------------- */
-  const [sipDomain, setSipDomain] = useState("");
-  const [sipUsername, setSipUsername] = useState("");
-  const [sipPassword, setSipPassword] = useState("");
+  const [sipDomain,   setSipDomain]   = useState(SIP_DOMAIN ?? "");
+  const [sipUsername, setSipUsername] = useState(SIP_USERNAME ?? "");
+  const [sipPassword, setSipPassword] = useState(SIP_PASSWORD ?? "");
   const [isRegistered, setIsRegistered] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
@@ -232,6 +237,9 @@ export function VoiceAgent() {
         setAnswerText(answerTextRef.current);
       } else if (msg.type === "answer_end") {
         setStatus("AI speaking / listening", "success", true);
+      } else if (msg.type === "hangup") {
+        setStatus("Connecting you to the clinic team — call ended", "success");
+        void hangUpSIP();
       } else if (msg.type === "interrupt") {
         stopTTSPlayback();
       } else if (msg.type === "error") {
@@ -302,7 +310,11 @@ export function VoiceAgent() {
           outputChannelCount: [1],
           channelCount: 1,
           channelCountMode: "explicit",
-          processorOptions: { targetRate: INPUT_SAMPLE_RATE },
+          // Forward less trailing silence so Deepgram can finalize a turn sooner.
+          processorOptions: {
+            targetRate: INPUT_SAMPLE_RATE,
+            trailingSilenceMs: 700,
+          },
         }
       );
 
@@ -1155,7 +1167,7 @@ export function VoiceAgent() {
           <input
             type="text"
             id="sipUsername"
-            placeholder="118"
+            placeholder="1001"  
             autoComplete="username"
             value={sipUsername}
             onChange={(e) => setSipUsername(e.target.value)}
@@ -1167,7 +1179,7 @@ export function VoiceAgent() {
           <input
             type="password"
             id="sipPassword"
-            placeholder="0854d236"
+            placeholder="7e15842a"
             autoComplete="current-password"
             value={sipPassword}
             onChange={(e) => setSipPassword(e.target.value)}

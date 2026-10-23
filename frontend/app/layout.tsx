@@ -11,6 +11,7 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  /** Provide the shared HTML document and metadata for every Next.js page. */
   return (
     <html lang="en">
       <body>{children}</body>
