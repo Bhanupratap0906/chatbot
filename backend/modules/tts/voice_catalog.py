@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from modules.common.protocols import VoiceValidator
+from modules.common.backend_contracts import VoiceValidator
 
 
 VOICES = [
@@ -24,12 +24,15 @@ class AllowedVoiceValidator(VoiceValidator):
     """SRP: only knows which voice names are allowed."""
 
     def __init__(self, voices: list[str] | None = None):
+        """Set the allowed voice names; defaults to the application's voice catalogue."""
         self._voices = list(voices) if voices is not None else list(VOICES)
 
     @property
     def voices(self) -> list[str]:
+        """Return allowed voices; used when sending available voices to the frontend."""
         return list(self._voices)
 
     def validate(self, voice: str) -> None:
+        """Raise for unsupported voices; called before TTS generation."""
         if voice not in self._voices:
             raise ValueError(f"Invalid voice: {voice}")

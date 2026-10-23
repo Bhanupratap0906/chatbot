@@ -1,6 +1,6 @@
 """Async bridge for blocking TTS generation (SRP).
 
-``ThreadedAsyncSpeaker`` only adapts a blocking chunk iterator onto the
+``ThreadedTextToSpeechSpeaker`` only adapts a blocking chunk iterator onto the
 event loop and strips a WAV header if the provider ignored
 ``container=none``. Validation and generation are injected (DIP), so this
 class never changes when voices or providers change (OCP).
@@ -9,18 +9,21 @@ class never changes when voices or providers change (OCP).
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable, Iterable
 
-from modules.common.protocols import AsyncSpeaker, VoiceValidator
+logger = logging.getLogger("tts")
 
+class ThreadedTextToSpeechSpeaker:
+    """Stream blocking audio generation without blocking the asyncio event loop."""
 
-class ThreadedAsyncSpeaker(AsyncSpeaker):
-    def __init__(self, validator: VoiceValidator, chunk_factory: Callable[[str, str], Iterable[bytes]]):
-        self._validator = validator
+    def __init__(self, chunk_factory: Callable[[str, str], Iterable[bytes]]):
+        """Store the audio-chunk generator used for each speech request."""
         self._chunk_factory = chunk_factory
 
     async def speak(self, text: str, voice: str, send_bytes) -> None:
+        """Run audio generation on a worker thread and forward chunks to the callback."""
         # Validation is intentionally delegated: callers (facade) validate
         # text+voice once; this bridge only streams.
         loop = asyncio.get_running_loop()
@@ -28,6 +31,7 @@ class ThreadedAsyncSpeaker(AsyncSpeaker):
         stop = threading.Event()
 
         def produce():
+            """Generate chunks on the worker and safely enqueue chunks/errors for asyncio."""
             try:
                 for chunk in self._chunk_factory(text, voice):
                     if stop.is_set():
@@ -57,6 +61,6 @@ class ThreadedAsyncSpeaker(AsyncSpeaker):
                     sent += len(chunk)
                     await send_bytes(chunk)
             if sent == 0:
-                print(f"[tts] WARNING: no audio returned for {text!r}")
+                logger.warning("no audio returned for %r", text)
         finally:
             stop.set()

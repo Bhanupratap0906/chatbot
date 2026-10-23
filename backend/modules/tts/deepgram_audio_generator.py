@@ -8,31 +8,40 @@ facade don't need to know provider quirks (SRP). New providers implement
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from deepgram import DeepgramClient
 
-from modules.common.protocols import AudioGenerator
+from modules.common.conversation_cost_tracker import ConversationCostTracker
 from modules.common.settings import get_settings
 
+logger = logging.getLogger("tts")
 
-class DeepgramAudioGenerator(AudioGenerator):
+
+class DeepgramAudioGenerator:
+    """Request speech audio from Deepgram and yield its PCM chunks."""
+
     def __init__(
         self,
         client: DeepgramClient | None = None,
         sample_rate: int | None = None,
         api_key: str | None = None,
+        cost_tracker: ConversationCostTracker | None = None,
     ):
+        """Configure the Deepgram client and output sample rate."""
         settings = get_settings()
         resolved_key = api_key if api_key is not None else settings.deepgram_api_key
         if not resolved_key and client is None:
             raise ValueError("DEEPGRAM_API_KEY is not configured")
         self._client = client or DeepgramClient(api_key=resolved_key)
         self._sample_rate = sample_rate if sample_rate is not None else settings.tts_sample_rate
+        self._cost_tracker = cost_tracker
         # Set once we know which kwargs this account/SDK actually accepts.
         self._raw_pcm_supported: bool | None = None
 
-    def _generate_raw(self, text: str, voice: str, raw: bool):
+    def _request_audio_from_deepgram(self, text: str, voice: str, raw: bool):
+        """Request either raw PCM or WAV fallback audio from Deepgram."""
         if raw:
             return self._client.speak.v2.audio.generate(
                 text=text,
@@ -48,14 +57,13 @@ class DeepgramAudioGenerator(AudioGenerator):
             container="wav",
         )
 
-    def generate(self, text: str, voice: str, raw: bool) -> Iterable[bytes]:
-        return self._generate_raw(text, voice, raw)
-
-    def iter_chunks(self, text: str, voice: str) -> Iterable[bytes]:
+    def generate_audio_chunks(self, text: str, voice: str) -> Iterable[bytes]:
         """Blocking generator of linear16 chunks with WAV fallback."""
+        if self._cost_tracker is not None:
+            self._cost_tracker.add_tts_text(text, voice)
         if self._raw_pcm_supported is None:
             try:
-                response = self._generate_raw(text, voice, raw=True)
+                response = self._request_audio_from_deepgram(text, voice, raw=True)
                 iterator = iter(response)
                 first = next(iterator)
                 self._raw_pcm_supported = True
@@ -69,9 +77,9 @@ class DeepgramAudioGenerator(AudioGenerator):
                 self._raw_pcm_supported = True
                 return
             except Exception as error:
-                print("Deepgram rejected raw PCM, falling back to WAV:", error)
+                logger.warning("Deepgram rejected raw PCM, falling back to WAV: %r", error)
                 self._raw_pcm_supported = False
 
-        for chunk in self._generate_raw(text, voice, raw=self._raw_pcm_supported):
+        for chunk in self._request_audio_from_deepgram(text, voice, raw=self._raw_pcm_supported):
             if chunk:
                 yield chunk

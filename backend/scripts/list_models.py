@@ -16,6 +16,7 @@ if not api_key:
 
 
 def main():
+    """List Groq models available to the configured API key; run manually to choose ``GROQ_MODEL``."""
     try:
         from groq import Groq
     except ImportError:

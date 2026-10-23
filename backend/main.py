@@ -1,53 +1,74 @@
-from pathlib import Path
+"""FastAPI entry point for the Voice AI backend.
 
-import uvicorn
-from dotenv import load_dotenv
+Configures structured application-wide logging so every subsystem emits
+consistent, greppable lines (timestamp, level, logger, message). API,
+booking, and tool logs all flow through this format.
+"""
+
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+import uvicorn
 
-BASE_DIR = Path(__file__).resolve().parent
+from modules.portal.appointments_router import router as appointments_router
+from modules.portal.auth_router import router as auth_router
+from modules.realtime.voice_websocket_controller import router as voice_router
 
-# Load backend/.env regardless of the working directory uvicorn is
-# started from (modules also call load_dotenv() as a fallback).
-load_dotenv(BASE_DIR / ".env")
 
-from modules.stt.stt_controller import router as stt_router
-from modules.tts.tts_controller import router as tts_router
-from modules.realtime.voice_controller import router as voice_router
+def configure_structured_application_logging() -> None:
+    """Install one structured log format for every module logger.
 
+    Format: ``<time> | <LEVEL> | <logger> | <message>``. Third-party loggers
+    (httpx, uvicorn.access) are kept quieter so app/API/tool lines stay readable.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # Keep noisy third-party HTTP/uvicorn access logs below app chatter.
+    for noisy in ("httpx", "httpcore", "uvicorn.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+configure_structured_application_logging()
 
 app = FastAPI(
     title="Voice AI",
 )
 
-# Allow the Next.js frontend (dev on :3000, prod on its own origin) to reach
-# the API + /ws/voice. WebSockets don't use CORS, but the REST routers do.
+
+@app.get("/health")
+async def health_check():
+    """Basic process liveness endpoint for local/dev health checks."""
+    return {"status": "ok"}
+
+# Cookie-based portal auth requires credentialed CORS with explicit origins
+# (browsers reject `*` + credentials). Next.js dev server runs on :3000.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# Register routers
-app.include_router(stt_router) 
-app.include_router(tts_router)
+# Register the live-call websocket route.
 app.include_router(voice_router)
 
+# Customer-portal session (login page -> portal JWT -> chatbot cookie)
+# and the appointment list/details/book proxies that replay it as Bearer.
+app.include_router(auth_router)
+app.include_router(appointments_router)
 
-@app.get("/")
-async def root():
-    """Serve the static landing page when the browser requests ``/``; registered on the FastAPI app below."""
-    return FileResponse(BASE_DIR / "static" / "index.html")
 
-
-def start():
+def start_fastapi_server():
     """Start the local FastAPI server; used by the ``python main.py`` entry point."""
     uvicorn.run(
         "main:app",
@@ -58,4 +79,4 @@ def start():
 
 
 if __name__ == "__main__":
-    start()
+    start_fastapi_server()
