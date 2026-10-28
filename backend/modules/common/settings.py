@@ -80,7 +80,7 @@ class Settings:
     # a chatbot-domain cookie (see modules/portal/). The active locationId
     # is read from the JWT session (modules/portal/session.py); the
     # PORTAL_LOCATION_ID below is only a last-resort override.
-    portal_base_build_portal_url: str = field(
+    portal_base_url: str = field(
         default_factory=lambda: os.getenv("PORTAL_BASE_URL", "http://localhost:50001/api")
     )
     portal_timeout: float = field(default_factory=lambda: float(os.getenv("PORTAL_TIMEOUT", "15")))

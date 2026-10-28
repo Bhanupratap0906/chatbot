@@ -160,7 +160,7 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 ### `modules/portal/cookie_header_parser.py`
 
 - **Purpose**: Parse raw Cookie header.
-- **Public**: `extract_extract_token_from_cookie_header(header, cookie_name) -> Optional[str]`.
+- **Public**: `extract_token_from_cookie_header(header, cookie_name) -> Optional[str]`.
 - **Project imports**: none.
 - **Used by**: `modules.realtime.voice_websocket_controller.handle_voice_websocket_connection`.
 - **External/config**: none.
@@ -367,7 +367,7 @@ sequenceDiagram
     M->>VC: include_router(voice_router)
     Note over VC: client opens /ws/voice
     VC->>VC: handle_voice_websocket_connection(ws)
-    VC->>VC: extract_extract_token_from_cookie_header(...)
+    VC->>VC: extract_token_from_cookie_header(...)
     VC->>VC: portal_token_store.set(...)
     VC->>STT: DeepgramRealtimeConnector(...).connect_to_deepgram_realtime()
     VC->>VS: RealtimeVoiceSession(ws, dg, voice=..., settings=...)
@@ -459,7 +459,7 @@ Exact path: `workflow/conversation_workflow_graph.py:ConversationWorkflow._execu
 - Login: `portal/auth_router.py:login` -> `portal/portal_http_client.py:CustomerPortalHttpClient.login` -> `portal/token_store.py:portal_token_store.set` + `portal/session.py:extract_location_id_from_jwt` -> `portal/auth_router.py:_set_portal_cookie`.
 - Logout: `portal/auth_router.py:logout` -> `portal/portal_http_client.py:CustomerPortalHttpClient.request(POST /admin/auth/logout)` -> `portal/token_store.py:portal_token_store.clear` + delete cookie.
 - Me: `portal/auth_router.py:me` -> `portal/portal_token_dependency.py:resolve_portal_token_from_request` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_token_details` -> `portal/token_store.py:portal_token_store.set_location`.
-- WS handshake: `voice_websocket_controller.py:handle_voice_websocket_connection` -> `portal/cookie_header_parser.py:extract_extract_token_from_cookie_header` -> `portal/token_store.py:portal_token_store.set`.
+- WS handshake: `voice_websocket_controller.py:handle_voice_websocket_connection` -> `portal/cookie_header_parser.py:extract_token_from_cookie_header` -> `portal/token_store.py:portal_token_store.set`.
 - Tools: `portal/session.py:resolve_active_location_id` (store -> JWT claim -> token details -> env).
 
 ### 4g. Cost tracking

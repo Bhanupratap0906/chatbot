@@ -97,13 +97,13 @@ class CustomerPortalHttpClient:
 
     def __init__(
         self,
-        base_build_portal_url: Optional[str] = None,
+        base_url: Optional[str] = None,
         timeout: Optional[float] = None,
         http: Optional[httpx.AsyncClient] = None,
     ) -> None:
         """Build the client from ``Settings`` unless explicit values are given."""
         settings = get_settings()
-        self._base_build_portal_url = (base_build_portal_url or settings.portal_base_build_portal_url).rstrip("/")
+        self._base_url = (base_url or settings.portal_base_url).rstrip("/")
         self._http = http or httpx.AsyncClient(
             timeout=timeout or settings.portal_timeout
         )
@@ -114,7 +114,7 @@ class CustomerPortalHttpClient:
 
     def _build_portal_url(self, path: str) -> str:
         """Join a portal path (``/appointments/...``) onto the base URL."""
-        return f"{self._base_build_portal_url}/{path.lstrip('/')}"
+        return f"{self._base_url}/{path.lstrip('/')}"
 
     @staticmethod
     def _raise_portal_error_for_envelope(status_code: int, body: Any) -> None:

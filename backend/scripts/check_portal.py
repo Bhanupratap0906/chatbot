@@ -19,9 +19,9 @@ from modules.portal.portal_http_client import get_shared_portal_http_client
 from modules.portal.errors import PortalApiError, PortalNetworkError
 
 
-def _health_build_portal_url(base_build_portal_url: str) -> str:
+def _health_build_portal_url(base_url: str) -> str:
     """The portal serves /health at the root (no /api prefix)."""
-    trimmed = base_build_portal_url[:-4] if base_build_portal_url.endswith("/api") else base_build_portal_url
+    trimmed = base_url[:-4] if base_url.endswith("/api") else base_url
     return f"{trimmed.rstrip('/')}/health"
 
 
@@ -34,14 +34,14 @@ async def main() -> None:
     args = parser.parse_args()
 
     client = get_shared_portal_http_client()
-    base_build_portal_url = client._base_build_portal_url  # noqa: SLF001 — smoke script, same package
-    print(f"portal base : {base_build_portal_url}")
+    base_url = client._base_url  # noqa: SLF001 — smoke script, same package
+    print(f"portal base : {base_url}")
 
     # 1. health (no auth)
     import httpx
 
     try:
-        health = await httpx.AsyncClient().get(_health_build_portal_url(base_build_portal_url), timeout=5)
+        health = await httpx.AsyncClient().get(_health_build_portal_url(base_url), timeout=5)
         print(f"health      : HTTP {health.status_code}")
     except httpx.HTTPError as error:
         print(f"health      : FAILED — {error}")
