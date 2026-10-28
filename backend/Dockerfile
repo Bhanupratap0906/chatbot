@@ -8,11 +8,9 @@ ENV PYTHONUNBUFFERED=1
 # Non-root user
 RUN groupadd --system app && useradd --system --gid app app
 
-COPY pyproject.toml ./
-# Install dependencies from pyproject (single source of truth)
-RUN pip install --no-cache-dir .
-
 COPY . .
+
+RUN pip install --no-cache-dir .
 
 RUN chown -R app:app /app
 USER app
