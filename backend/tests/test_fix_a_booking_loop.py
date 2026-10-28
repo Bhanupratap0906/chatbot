@@ -38,7 +38,7 @@ async def test_booking_confirmed_after_readback():
     }}
     ai_msg = AIMessage(content="Booking now.", tool_calls=[tool_call])
     state: WorkflowState = {
-        "messages": [HumanMessage(content="Yes I confirm")],
+        "messages": [HumanMessage(content="Yes I confirm"), ai_msg],
         "turn_text": "Yes I confirm",
         "turn_id": 2,
         "workflow": {"pending_booking": wf.workflow_state["pending_booking"]},

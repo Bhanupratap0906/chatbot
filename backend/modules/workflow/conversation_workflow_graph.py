@@ -22,6 +22,22 @@ from modules.llm.llm_tool_call_executor import LlmToolCallExecutor
 logger = logging.getLogger("workflow.graph")
 
 
+def _is_affirmative(text: str) -> bool:
+    """Clear affirmative only when no negation or correction is present."""
+    lowered = (text or "").lower()
+    # Reject if any negation/correction term appears
+    negations = {"no", "not", "n't", "wrong", "incorrect", "actually", "instead", "change", "wait", "but", "different", "other"}
+    words = lowered.split()
+    has_negation = any(w in negations for w in words) or any(w.startswith("n't") or w.startswith("n'") for w in words)
+    # Also reject if the text contains a correction pattern
+    if any(term in lowered for term in ("that's not", "not right", "not correct", "i don't", "i cant", "i can't", "it isn't", "its not")):
+        has_negation = True
+    if has_negation:
+        return False
+    affirmative_words = {"yes", "yeah", "yep", "correct", "right", "sure", "go ahead", "confirm", "okay", "ok"}
+    return any(w.strip(".,!?") in affirmative_words for w in words)
+
+
 from modules.workflow.conversation_agents import AgentRole, AGENT_ROLES, messages_for_agent, route_to_agent
 
 
@@ -394,6 +410,7 @@ class ConversationWorkflow:
             import re as _re
 
             # Don't trust confirmed_by_patient. Require a real read-back + affirmative.
+            from modules.common.datetime_parsing import normalize_date_str, normalize_time_str
             date_val = str(args.get("appointment_date") or "").strip()
             time_val = str(args.get("appointment_time") or "").strip()
             messages_list = list(state.get("messages", []))
@@ -407,19 +424,99 @@ class ConversationWorkflow:
                             prev_ai = messages_list[j]
                             break
                     break
+            # Read-back by normalized value
             readback_ok = False
             if prev_ai is not None:
                 content = str(prev_ai.content or "")
-                readback_ok = (date_val and date_val in content) and (time_val and time_val in content)
+                # Check that patient name tokens appear in read-back
+                name_tokens = set(str(args.get("patient_name") or "").lower().split())
+                content_lower = content.lower()
+                name_present = all(tok in content_lower for tok in name_tokens if len(tok) > 2)
+                # Compare parsed date/time
+                parsed_date = normalize_date_str(date_val)
+                parsed_time = normalize_time_str(time_val)
+                spoken_date_ok = False
+                spoken_time_ok = False
+                if parsed_date is not None:
+                    spoken_date_ok = any(str(parsed_date) in s or (s.replace("-", " ") in content_lower) for s in (date_val,))
+                    # More flexible: check month/day in spoken form
+                    spoken_date_ok = spoken_date_ok or (str(parsed_date.month) in content_lower and str(parsed_date.day) in content_lower)
+                if parsed_time is not None:
+                    spoken_time_ok = parsed_time in content_lower or parsed_time.replace(":", " ") in content_lower
+                readback_ok = name_present and spoken_date_ok and spoken_time_ok
             latest_user = str(state.get("turn_text") or "")
-            affirmative = bool(_re.search(r"\b(yes|yeah|yep|correct|right|sure|go ahead|confirm)\b", latest_user.lower()))
-            if missing or not str(args.get("service") or "").strip() or not readback_ok or not affirmative:
+            affirmative = _is_affirmative(latest_user)
+            # Two-phase confirmation with pending_booking state
+            pending = state.get("workflow", {}).get("pending_booking") or state.get("pending_booking")
+            args_match_pending = False
+            if pending is not None:
+                pending_name = str(pending.get("patient_name") or "").lower()
+                args_name = str(args.get("patient_name") or "").lower()
+                args_match_pending = (
+                    normalize_date_str(str(pending.get("date") or "")) == normalize_date_str(str(args.get("appointment_date") or ""))
+                    and normalize_time_str(str(pending.get("time") or "")) == normalize_time_str(str(args.get("appointment_time") or ""))
+                    and (not args_name or args_name in pending_name or pending_name in args_name or args_name == pending_name)
+                )
+            else:
+                # First phase: require read-back; set pending_booking
+                if prev_ai is not None and readback_ok:
+                    pending = {
+                        "patient_name": args.get("patient_name"),
+                        "date": args.get("appointment_date"),
+                        "time": args.get("appointment_time"),
+                        "service": args.get("service"),
+                        "mobile_number": args.get("mobile_number"),
+                    }
+            # If args don't match pending and pending exists, clear it (user changed details)
+            if pending is not None and not args_match_pending:
+                pending = None
+            # For first-phase booking with no pending, we require a read-back but do NOT allow booking yet
+            # unless this is the confirmation turn (pending exists and user is affirmative and args match)
+            if pending is not None and args_match_pending and affirmative:
+                # Confirmation turn: allow booking
+                pass
+            elif pending is None and not (prev_ai is not None and readback_ok) and not missing and args.get("service"):
+                # First-time booking without read-back: set pending and block
+                pending = {
+                    "patient_name": args.get("patient_name"),
+                    "date": args.get("appointment_date"),
+                    "time": args.get("appointment_time"),
+                    "service": args.get("service"),
+                    "mobile_number": args.get("mobile_number"),
+                }
+                detail = "Read back the details and ask the patient to confirm before booking. "
+                errors["book_appointment"] = "booking_requires_confirmation_or_details"
+                self._current_tool_errors = errors
+                self._current_tool_calls = calls_by_name
+                self._turn_tool_rounds += 1
+                self.tool_errors = errors
+                self.tool_calls_by_name = calls_by_name
+                return {
+                    "messages": [
+                        ToolMessage(
+                            content=(
+                                "Booking blocked. " + detail
+                                + "Repeat all booking details and ask the patient to explicitly confirm before submitting."
+                            ),
+                            tool_call_id=call["id"],
+                        )
+                    ] + blocked,
+                    "tool_calls_by_name": calls_by_name,
+                    "tool_errors": errors,
+                    "max_tool_rounds": state.get("max_tool_rounds", 0) + 1,
+                    "pending_booking": pending,
+                    "workflow": {**state.get("workflow", {}), "pending_booking": pending},
+                }
+            # If pending exists but args don't match, or user isn't affirmative: block
+            if (pending is not None and (not args_match_pending or not affirmative)) or missing or not str(args.get("service") or "").strip() or (prev_ai is not None and not readback_ok):
                 detail = "Missing required details: " + ", ".join(missing) + ". " if missing else ""
                 if not str(args.get("service") or "").strip():
                     detail += "Ask what problem or symptom the patient needs help with and pass that description as service. "
-                if not readback_ok:
+                if prev_ai is not None and not readback_ok:
                     detail += "Read back name, date, time and reason in one sentence, then wait for a clear yes. "
-                if not affirmative:
+                if pending is not None and not args_match_pending:
+                    detail += "Booking details have changed; confirm the new details before booking. "
+                if pending is not None and not affirmative:
                     detail += "Wait for the patient to clearly confirm before booking. "
                 errors["book_appointment"] = "booking_requires_confirmation_or_details"
                 self._current_tool_errors = errors
@@ -440,6 +537,8 @@ class ConversationWorkflow:
                     "tool_calls_by_name": calls_by_name,
                     "tool_errors": errors,
                     "max_tool_rounds": state.get("max_tool_rounds", 0) + 1,
+                    "pending_booking": pending if (prev_ai is not None and readback_ok) else None,
+                    "workflow": {**state.get("workflow", {}), "pending_booking": pending if (prev_ai is not None and readback_ok) else None},
                 }
         calls_to_run = []
         for call in response.tool_calls:
