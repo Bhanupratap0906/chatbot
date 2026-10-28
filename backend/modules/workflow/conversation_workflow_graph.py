@@ -407,8 +407,6 @@ class ConversationWorkflow:
                 for key in ("patient_name", "appointment_date", "appointment_time", "mobile_number")
                 if not str(args.get(key) or "").strip()
             ]
-            import re as _re
-
             # Don't trust confirmed_by_patient. Require a real read-back + affirmative.
             from modules.common.datetime_parsing import normalize_date_str, normalize_time_str
             date_val = str(args.get("appointment_date") or "").strip()
