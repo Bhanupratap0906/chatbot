@@ -31,6 +31,7 @@ from modules.common.redact import redact
 from modules.llm.sentence_chunk_splitter import SentenceChunkSplitter
 from modules.realtime.greeting_service import GreetingService
 from modules.realtime.conversation_history import InMemoryConversationHistory
+from modules.realtime.conversation_coordinator import ConversationCoordinator, BookingState, BookingResult
 from modules.tts.voice_catalog import VOICES
 
 logger = logging.getLogger("session")
@@ -379,6 +380,8 @@ class RealtimeVoiceSession:
             greeting_text=self._settings.greeting_text,
             voice=self.voice,
         )
+        # Shared session coordinator for Speaking Agent + Booking Agent
+        self.coordinator = ConversationCoordinator(session_id=self.session_id)
     @property
     def turn(self):
         """Return the active turn task for controller cleanup."""
@@ -526,10 +529,21 @@ class RealtimeVoiceSession:
         text = self._buffer.take_pending_transcript()
         if not text:
             return
+        # Record utterance with coordinator for intent-aware routing
+        await self.coordinator.receive_utterance(text)
         # Ignore backchannels/short utterances while the agent is speaking.
         words = text.lower().split()
         if self.turns.task is not None and not self.turns.task.done():
             if len(words) <= 2 or all(w.strip(".,!?") in self._BACKCHANNELS for w in words):
+                # If a confirmation is pending, treat affirmative backchannel as confirmation
+                if self.coordinator.state.booking_status == BookingState.AWAITING_PATIENT_CONFIRMATION:
+                    affirmative_words = {"yes", "yeah", "yep", "correct", "right", "sure", "go ahead", "confirm"}
+                    is_affirmative = any(w.strip(".,!?") in affirmative_words for w in words)
+                    if is_affirmative:
+                        await self.coordinator.confirm_pending_booking()
+                        # Speak acknowledgment without restarting full turn
+                        await self._publisher.send_json({"type": "token", "text": "Thank you for confirming. I'll finalize that now."})
+                        return
                 logger.info("ignoring backchannel/short utterance while speaking: %r", redact(text))
                 return
         await self.turns.start_assistant_turn(text)
@@ -557,7 +571,7 @@ class RealtimeVoiceSession:
             if self._no_answer_repeats >= 1:
                 return
             self._no_answer_repeats += 1
-            prompt = "Are you still there? " + self._last_assistant_text
+            prompt = self._last_assistant_text
             await self._publisher.send_json({"type": "token", "text": prompt})
             voice = self.voice
             async def send_with_log(chunk: bytes):

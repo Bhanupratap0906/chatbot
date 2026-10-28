@@ -34,6 +34,7 @@ class TextToSpeechService:
         self.generator = generator or DeepgramAudioGenerator(
             api_key=api_key, cost_tracker=cost_tracker
         )
+        self.cost_tracker = cost_tracker
         self.speaker = speaker or ThreadedTextToSpeechSpeaker(self.generator.generate_audio_chunks)
 
     # ---------- SRP: validation only ----------
@@ -48,3 +49,5 @@ class TextToSpeechService:
         """Stream one chunk of TTS audio via an async ``send_bytes`` callback."""
         self._validate_text_and_voice_for_synthesis(text, voice)
         await self.speaker.speak(text, voice, send_bytes)
+        if self.cost_tracker is not None:
+            self.cost_tracker.add_tts_text(text, voice)

@@ -131,8 +131,6 @@ class ConversationWorkflow:
         # Conversation-level booking tracking stays (item 4)
         self._booking_confirmation = ""
         self._active_agent = ""
-        self._pending_booking: dict | None = None
-        self._booked_in_conversation = False
         self._turn_id = 0
         self.history_messages: list[BaseMessage] = []
         self.workflow_state: dict[str, Any] = {}
@@ -145,8 +143,6 @@ class ConversationWorkflow:
         self._turn_tool_rounds = 0
         self._turn_assigned_agent = ""
         self._active_agent = ""
-        self._pending_booking: dict | None = None
-        self._booked_in_conversation = False
         self.agent_assignments: list[dict[str, str]] = []
 
     def _get_graph_config(self) -> dict[str, Any]:
@@ -169,7 +165,6 @@ class ConversationWorkflow:
         self._turn_tool_rounds = 0
         self._turn_assigned_agent = ""
         self.agent_assignments = []
-        self._pending_booking = None
         self._current_turn_hangup = False
         self._turn_id = 0
         self.workflow_state = {}
@@ -194,7 +189,7 @@ class ConversationWorkflow:
         graph.add_conditional_edges(
             "respond",
             self._route_after_response,
-            {"tools": "tools", "done": "record_turn"},
+            {"tools": "tools", "tool_limit": "tool_limit", "done": "record_turn"},
         )
         graph.add_edge("tools", "respond")
         graph.add_edge("tool_limit", "record_turn")
@@ -298,28 +293,36 @@ class ConversationWorkflow:
         if human_handoff == "hangup" or self.hangup_requested or self._current_turn_hangup:
             return {"messages": [AIMessage(content="HANGUP_CALL")], **assigned}
         if not scoped_tools:
+            print(f"===== LLM REQUEST ===== model={self.model} agent=none turn_id={self._turn_id} turn_text={self._current_turn_text!r} messages_count={len(messages)}")
             response = await self.llm.ainvoke(messages)
+            print(f"===== LLM RESPONSE ===== model={self.model} turn_id={self._turn_id} content={str(getattr(response, 'content', response))[:300]!r} tool_calls={getattr(response, 'tool_calls', None)}")
             if self.cost_tracker is not None and hasattr(response, "usage_metadata") and response.usage_metadata:
                 self.cost_tracker.add_llm_usage(response.usage_metadata, self.model)
             return {"messages": [response], **assigned}
         if self._turn_tool_rounds >= 3:
             messages.append(SystemMessage(content="Tool calls are exhausted for this turn. Reply now without calling any tools."))
+            print(f"===== LLM REQUEST (tool exhausted) ===== model={self.model} agent={agent.name if agent else 'none'} turn_id={self._turn_id} turn_text={self._current_turn_text!r} messages_count={len(messages)} turn_tool_rounds={self._turn_tool_rounds}")
             response = await self.llm.ainvoke(
                 [SystemMessage(content=agent.system_prompt), *messages[1:]]
             )
+            print(f"===== LLM RESPONSE (tool exhausted) ===== model={self.model} turn_id={self._turn_id} content={str(getattr(response, 'content', response))[:300]!r} tool_calls={getattr(response, 'tool_calls', None)}")
             if self.cost_tracker is not None and hasattr(response, "usage_metadata") and response.usage_metadata:
                 self.cost_tracker.add_llm_usage(response.usage_metadata, self.model)
             return {"messages": [response], **assigned}
         try:
+            print(f"===== LLM REQUEST (agent/agent_llm) ===== model={self.model} agent={agent.name if agent else 'none'} turn_id={self._turn_id} turn_text={self._current_turn_text!r} scoped_tools={sorted([getattr(t, 'name', str(t)) for t in scoped_tools])} messages_count={len(messages)} turn_tool_rounds={self._turn_tool_rounds}")
             response = await agent_llm.ainvoke(messages)
         except Exception as error:
             if getattr(error, "status_code", None) == 429 or "rate_limit" in str(error).lower() or "rate limit" in str(error).lower():
                 return {"messages": [AIMessage(content="RATE_LIMIT_BUSY")], **assigned}
             if not is_tool_validation_error(error):
                 raise
+            print(f"===== LLM REQUEST (error fallback) ===== model={self.model} agent={agent.name if agent else 'none'} turn_id={self._turn_id} error_reason=validation_or_rate_limit messages_count={len([SystemMessage(content=agent.system_prompt), *messages[1:]])}")
             response = await self.llm.ainvoke(
                 [SystemMessage(content=agent.system_prompt), *messages[1:]]
             )
+            print(f"===== LLM RESPONSE (error fallback) ===== model={self.model} turn_id={self._turn_id} content={str(getattr(response, 'content', response))[:300]!r}")
+        print(f"===== LLM RESPONSE (agent/agent_llm) ===== model={self.model} turn_id={self._turn_id} content={str(getattr(response, 'content', response))[:300]!r} tool_calls={getattr(response, 'tool_calls', None)}")
         if self.cost_tracker is not None and hasattr(response, "usage_metadata") and response.usage_metadata:
             self.cost_tracker.add_llm_usage(response.usage_metadata, self.model)
         return {"messages": [response], **assigned}
@@ -575,8 +578,6 @@ class ConversationWorkflow:
                     self._booked_this_turn = True
                     self._booking_confirmation = str(tool_message.content)
                     self._active_agent = ""
-        self._pending_booking: dict | None = None
-        self._booked_in_conversation = False
         if state.get("turn_id") == self._turn_id:
             self._turn_tool_rounds += 1
             self._current_tool_calls = dict(calls_by_name)
@@ -605,6 +606,8 @@ class ConversationWorkflow:
         if not response:
             return "done"
         if response.tool_calls:
+            if state.get("max_tool_rounds", 0) >= 2:
+                return "tool_limit"
             return "tools"
         return "done"
 

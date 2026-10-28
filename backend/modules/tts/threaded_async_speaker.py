@@ -9,6 +9,7 @@ class never changes when voices or providers change (OCP).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 from collections.abc import Callable, Iterable
@@ -35,11 +36,14 @@ class ThreadedTextToSpeechSpeaker:
 
         def produce():
             """Generate chunks on the worker and safely enqueue chunks/errors for asyncio."""
+            ctx = contextvars.copy_context()
             try:
-                for chunk in self._chunk_factory(text, voice):
-                    if stop.is_set():
-                        break
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                def _run_in_context():
+                    for chunk in self._chunk_factory(text, voice):
+                        if stop.is_set():
+                            break
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                ctx.run(_run_in_context)
             except Exception as error:
                 loop.call_soon_threadsafe(queue.put_nowait, error)
             finally:

@@ -76,7 +76,9 @@ async def find_patient_by_phone(mobile_number: str) -> str:
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
     try:
+        print(f"===== API LOOKUP: find_patient_by_phone ===== mobile={mobile_number} digits={digits} token={token}")
         envelope = await get_shared_portal_http_client().get_patient_list_data(token, search=digits)
+        print(f"===== API LOOKUP: find_patient_by_phone response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
     data = envelope.get("data") or {}
@@ -111,7 +113,9 @@ async def list_services() -> str:
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
     try:
+        print(f"===== API LOOKUP: list_services ===== token={token}")
         envelope = await get_shared_portal_http_client().get_procedure_master_list(token)
+        print(f"===== API LOOKUP: list_services response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
     items = envelope.get("data") or []
@@ -147,7 +151,9 @@ async def list_providers() -> str:
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
     try:
+        print(f"===== API LOOKUP: list_providers ===== token={token}")
         envelope = await get_shared_portal_http_client().get_appointment_master_data(token)
+        print(f"===== API LOOKUP: list_providers response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
     data = envelope.get("data") or {}
@@ -200,7 +206,9 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
             startDate=appointment_date,
             endDate=appointment_date,
         )
+        print(f"===== API LOOKUP: find_available_slots ===== date={appointment_date} service={service} service_id={match['procedureId']} payload={payload.to_payload() if hasattr(payload, 'to_payload') else payload}")
         envelope = await api.get_appointment_slots(payload)
+        print(f"===== API LOOKUP: find_available_slots response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
 
