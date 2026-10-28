@@ -79,7 +79,7 @@ class ConversationWorkflow:
         self.cost_tracker = cost_tracker
         if cost_tracker is not None:
             from langchain_groq import ChatGroq
-            from modules.llm.groq_llm_assistant import _UsageCapturingAsyncClient
+            from modules.common.usage_capturing_async_client import _UsageCapturingAsyncClient
 
             if isinstance(self.llm, ChatGroq):
                 original_client = self.llm.async_client
@@ -200,10 +200,6 @@ class ConversationWorkflow:
         if state.get("workflow", {}).get("human_handoff") == "hangup":
             return {"messages": [AIMessage(content="HANGUP_CALL")]}
         history = list(state.get("messages", []))
-        last_human_index = next(
-            (index for index in range(len(history) - 1, -1, -1) if isinstance(history[index], HumanMessage)),
-            -1,
-        )
         from langchain_core.messages import trim_messages
 
         conversation = trim_messages(
@@ -601,7 +597,6 @@ class ConversationWorkflow:
                 seed.append(HumanMessage(content=content) if role in ("human", "user") else AIMessage(content=content))
         else:
             seed = []
-        previous_turn_text = state.values.get("turn_text")
         self._current_turn_text = text
         self._turn_id += 1
         self.tool_calls_by_name = {}

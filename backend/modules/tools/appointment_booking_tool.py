@@ -71,7 +71,6 @@ def create_appointment_booking_handler(
             return "Booking not submitted: ask what problem or symptom the patient needs help with, then match it to a clinic service."
 
         # Validate mobile number.
-        digits = re.sub(r"\D", "", mobile_number or "") if False else None
         import re as _re
 
         mobile_digits = _re.sub(r"\D", "", mobile_number or "")

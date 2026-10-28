@@ -187,7 +187,6 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
         services = envelope_services.get("data") or []
         if not services:
             return "No services are configured for this location."
-        wanted = (service or "").strip().lower()
         match = _find_item_by_case_insensitive_name(services, service, "procedureDescription")
         if match is None and service:
             match = _find_best_item_by_keyword_score(services, _map_patient_problem_to_service_keywords(service))

@@ -157,14 +157,13 @@ def _find_item_by_case_insensitive_name(items: list[dict], wanted: Optional[str]
 # the service with the most keyword hits instead of the first hit.
 _PROBLEM_TERMS: dict[str, tuple[str, ...]] = {
     "clean": ("clean", "hygiene", "prophy"),
-    "toothache": ("toothache", "pain", "emergency", "exam"),
+    "toothache": ("toothache", "pain", "emergency", "exam", "filling", "restor"),
     "pain": ("pain", "emergency", "exam"),
     "hurt": ("pain", "emergency", "exam"),
     "cavity": ("cavity", "filling", "restor", "exam"),
     "molar": ("pain", "emergency", "exam", "filling", "restor"),
     "tooth": ("pain", "emergency", "exam", "filling", "restor"),
     "teeth": ("pain", "emergency", "exam", "filling", "restor"),
-    "toothache": ("toothache", "pain", "emergency", "exam", "filling", "restor"),
     "cavity's": ("cavity", "filling", "restor", "exam"),
     "broken": ("broken", "fracture", "emergency", "restor", "exam"),
     "chipped": ("chip", "emergency", "restor", "exam"),
