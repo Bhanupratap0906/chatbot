@@ -10,6 +10,9 @@ and routes forward it as ``Authorization: Bearer``.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -17,6 +20,24 @@ from modules.common.settings import get_settings
 from modules.portal.portal_http_client import CustomerPortalHttpClient, get_shared_portal_http_client
 from modules.portal.portal_token_dependency import resolve_portal_token_from_request
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
+
+
+
+# ---------- login rate limiting (5 attempts/min per IP) ----------
+
+_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+_LOGIN_LOCK = asyncio.Lock()
+
+
+async def _check_login_rate_limit(request: Request) -> None:
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    async with _LOGIN_LOCK:
+        recent = [t for t in _LOGIN_ATTEMPTS.get(ip, []) if now - t < 60.0]
+        if len(recent) >= 5:
+            raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+        recent.append(now)
+        _LOGIN_ATTEMPTS[ip] = recent
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
@@ -36,15 +57,13 @@ def _set_portal_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=settings.portal_cookie_max_age,
         httponly=True,
-        # Lax keeps localhost cross-port flows working (mirrors the portal
-        # dev behavior); flip to strict behind HTTPS in production.
-        samesite="lax",
-        secure=False,
+        samesite=settings.cookie_samesite,
+        secure=settings.cookie_secure,
         path="/",
     )
 
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(_check_login_rate_limit)])
 async def login(
     payload: PortalLoginRequest,
     response: Response,

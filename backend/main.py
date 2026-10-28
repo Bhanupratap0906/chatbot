@@ -62,12 +62,7 @@ async def health_check():
 # (browsers reject `*` + credentials). Next.js dev server runs on :3000.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],
+    allow_origins=get_settings().allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,9 +81,7 @@ def start_fastapi_server():
     """Start the local FastAPI server; used by the ``python main.py`` entry point."""
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
         port=8000,
-        reload=True,
     )
 
 
