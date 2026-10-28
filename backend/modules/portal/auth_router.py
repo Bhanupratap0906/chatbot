@@ -17,8 +17,6 @@ from modules.common.settings import get_settings
 from modules.portal.portal_http_client import CustomerPortalHttpClient, get_shared_portal_http_client
 from modules.portal.portal_token_dependency import resolve_portal_token_from_request
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
-from modules.portal.session import extract_location_id_from_jwt
-from modules.portal.token_store import portal_token_store
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
@@ -62,7 +60,6 @@ async def login(
     except PortalApiError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
-    portal_token_store.set(token, location_id=extract_location_id_from_jwt(token))
     _set_portal_cookie(response, token)
     return {"message": "Signed in"}
 
@@ -75,13 +72,12 @@ async def logout(
 ) -> dict:
     """Clear the local session; best-effort revoke at the portal too."""
     settings = get_settings()
-    token = request.cookies.get(settings.portal_cookie_name) or portal_token_store.get()
+    token = request.cookies.get(settings.portal_cookie_name)
     if token:
         try:
             await client.request("POST", "/admin/auth/logout", token=token)
         except PortalApiError:
             pass  # already invalid server-side — local clear is enough
-    portal_token_store.clear()
     response.delete_cookie(key=settings.portal_cookie_name, path="/")
     return {"message": "Signed out"}
 
@@ -95,14 +91,9 @@ async def me(
     try:
         envelope = await client.get_token_details(token)
     except PortalAuthError as error:
-        # Expired or revoked at the portal — drop our copy so the next
-        # request (and the frontend's /me probe) goes to /login.
-        portal_token_store.clear()
+        # Expired or revoked at the portal.
         raise HTTPException(status_code=401, detail=str(error)) from error
     except PortalApiError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
-    # Cache the active location while we have the session context.
-    data = envelope.get("data") if isinstance(envelope, dict) else None
-    portal_token_store.set_location((data or {}).get("locationId"))
     return envelope

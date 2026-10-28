@@ -20,7 +20,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from modules.common.settings import get_settings
 from modules.portal.cookie_header_parser import extract_token_from_cookie_header
 from modules.portal.session import extract_location_id_from_jwt
-from modules.portal.token_store import portal_token_store
 from modules.realtime.realtime_voice_session import RealtimeVoiceSession
 from modules.stt.deepgram_realtime_connector import DeepgramRealtimeConnector
 from modules.workflow.conversation_workflow_graph import release_thread
@@ -92,9 +91,6 @@ async def handle_voice_websocket_connection(ws: WebSocket):
     ws_token = extract_token_from_cookie_header(
         ws.headers.get("cookie"), settings.portal_cookie_name
     )
-    if ws_token:
-        portal_token_store.set(ws_token, location_id=extract_location_id_from_jwt(ws_token))
-
     if not settings.deepgram_api_key:
         await ws.close(code=1011, reason="DEEPGRAM_API_KEY is not configured")
         return
@@ -111,7 +107,14 @@ async def handle_voice_websocket_connection(ws: WebSocket):
 
     # DIP: session builds its default LLM/TTS internally, but they are
     # injectable — see ``RealtimeVoiceSession(ws, dg, llm=..., tts=...)``.
-    session = RealtimeVoiceSession(ws, dg, voice=settings.default_voice, settings=settings)
+    session = RealtimeVoiceSession(
+        ws,
+        dg,
+        voice=settings.default_voice,
+        settings=settings,
+        portal_token=ws_token,
+        portal_location_id=extract_location_id_from_jwt(ws_token) if ws_token else None,
+    )
     await _run_voice_session_pumps(ws, dg, session)
 
 

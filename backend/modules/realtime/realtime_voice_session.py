@@ -318,6 +318,8 @@ class RealtimeVoiceSession:
         history: ConversationHistory | None = None,
         splitter: ChunkSplitter | None = None,
         settings: Settings | None = None,
+        portal_token: str | None = None,
+        portal_location_id: str | None = None,
     ):
         """Wire websocket, STT, LLM, TTS, history, and turn services for one live call; built by the voice websocket route."""
         self.ws = ws
@@ -329,6 +331,11 @@ class RealtimeVoiceSession:
         from modules.portal.portal_http_client import set_api_audit
         self._api_audit_token = set_api_audit(self.api_calls)
         self.session_id = str(uuid.uuid4())
+        self.portal_token = portal_token
+        self.portal_location_id = portal_location_id
+        from modules.portal.token_store import set_portal_token
+        if portal_token:
+            set_portal_token(portal_token, location_id=portal_location_id)
         # DIP: concrete defaults keep old ``RealtimeVoiceSession(ws, dg)`` working,
         # but tests/callers may inject fakes (LSP).
         if llm is None:

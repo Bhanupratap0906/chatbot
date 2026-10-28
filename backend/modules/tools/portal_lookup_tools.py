@@ -25,7 +25,7 @@ from modules.portal.dtos import GetAppointmentSlotsRequestDto, SlotViewType
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
 from modules.portal.session import resolve_active_location_id, encrypt_location_id_for_portal
 from modules.tools.portal_appointment_booking_repository import _find_item_by_case_insensitive_name, _map_patient_problem_to_service_keywords, _find_best_item_by_keyword_score, _format_date_for_speech
-from modules.portal.token_store import portal_token_store
+from modules.portal.token_store import get_portal_token
 from modules.tools.tool_registry import TOOL_REGISTRY
 
 
@@ -45,7 +45,7 @@ def _map_portal_error_to_speakable_message(error: Exception) -> str:
 
 def _get_portal_session_token_or_none() -> Optional[str]:
     """Return the stored portal token, or ``None`` when nobody signed in."""
-    return portal_token_store.get()
+    return get_portal_token()
 
 
 async def _resolve_active_location_for_session(token: str) -> str:
