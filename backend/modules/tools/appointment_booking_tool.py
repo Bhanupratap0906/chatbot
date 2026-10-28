@@ -14,11 +14,13 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from langchain_core.tools import tool
 
 from modules.common.backend_contracts import AppointmentRepository, AppointmentValidator
+from modules.common.settings import get_settings
 from modules.tools.tool_registry import TOOL_REGISTRY
 from modules.tools.fallback_appointment_repository import get_default_repository, get_default_validator
 
@@ -82,7 +84,7 @@ def create_appointment_booking_handler(
                 bd = datetime.strptime(birth_date.strip(), "%Y-%m-%d")
             except ValueError:
                 return "That date of birth doesn't look right. Ask for it as YYYY-MM-DD."
-            if bd.date() > datetime.now().date():
+            if bd.date() > datetime.now(ZoneInfo(get_settings().clinic_timezone)).date():
                 return "Date of birth can't be in the future. Ask again."
 
         # Validate appointment_date.
@@ -96,7 +98,7 @@ def create_appointment_booking_handler(
                     continue
             if parsed_appt is None:
                 return "That appointment date doesn't look right. Ask for it again."
-            if parsed_appt.date() < datetime.now().date():
+            if parsed_appt.date() < datetime.now(ZoneInfo(get_settings().clinic_timezone)).date():
                 return "The appointment date must be today or later. Ask for a new date."
 
         try:
