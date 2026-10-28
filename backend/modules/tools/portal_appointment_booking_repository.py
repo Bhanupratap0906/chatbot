@@ -252,12 +252,20 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
 
         try:
             patient = await self._find_patient_by_mobile_number(token, mobile_number, patient_name, birth_date)
+            if isinstance(patient, dict) and patient.get("ambiguous"):
+                return (
+                    "I found more than one patient with that phone number. "
+                    "Please confirm the patient's full name and date of birth "
+                    "so I can pick the right record."
+                )
             if patient is None:
                 if birth_date and gender:
                     try:
                         name_parts = (patient_name or "").strip().split()
                         first = name_parts[0] if name_parts else patient_name or "Patient"
-                        last = " ".join(name_parts[1:]) if len(name_parts) > 1 else "Patient"
+                        if len(name_parts) < 2:
+                            return "I need the patient's full first and last name to create a record."
+                        last = " ".join(name_parts[1:])
                         payload = {
                             "firstName": first,
                             "lastName": last,
@@ -528,36 +536,27 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
         if not matches:
             return None
 
-        # Choose a match by name or birth date; never fall back to matches[0].
-        name_tokens = set((patient_name or "").lower().split())
-        chosen = None
-        for item in matches:
-            item_name = str(item.get("displayName") or item.get("patientName") or "").lower()
-            item_tokens = set(item_name.split())
-            if name_tokens and name_tokens.issubset(item_tokens) or (name_tokens and item_tokens and name_tokens == item_tokens):
-                chosen = item
-                break
-            if birth_date and item.get("birthDate"):
-                try:
-                    if str(item.get("birthDate"))[:10] == str(birth_date)[:10]:
-                        chosen = item
-                        break
-                    # also compare date part
-                    from datetime import datetime as _dt
-
-                    for fmt in _DATE_FORMATS:
-                        try:
-                            if _dt.strptime(str(item.get("birthDate"))[:10], "%Y-%m-%d").date() == _dt.strptime(str(birth_date)[:10], "%Y-%m-%d").date():
-                                chosen = item
-                                break
-                        except ValueError:
-                            continue
-                    if chosen:
-                        break
-                except Exception:
-                    continue
-        if chosen is None:
+        # Require a full-name match AND a date-of-birth match. No subset
+        # matching: "John" must not match "John Smith" sharing a phone.
+        name_needle = (patient_name or "").strip().lower()
+        filtered = list(matches)
+        if name_needle:
+            exact = [
+                m for m in filtered
+                if str(m.get("displayName") or m.get("patientName") or "").strip().lower() == name_needle
+            ]
+            filtered = exact
+        if birth_date:
+            dob_filtered = [
+                m for m in filtered
+                if str(m.get("birthDate") or "")[:10] == str(birth_date)[:10]
+            ]
+            filtered = dob_filtered
+        if not filtered:
             return None
+        if len(filtered) > 1:
+            return {"ambiguous": True, "count": len(filtered)}
+        chosen = filtered[0]
 
         name = chosen.get("displayName") or chosen.get("patientName") or patient_name
         return {
