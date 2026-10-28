@@ -94,6 +94,7 @@ export function VoiceAgent() {
   const answerTextRef = useRef("");
   const testModeActiveRef = useRef(false);
   const testMicStreamRef = useRef<MediaStream | null>(null);
+  const hangUpSIPRef = useRef<(() => Promise<void>) | null>(null);
 
   // Credentials captured at Start SIP click time (avoids stale closures).
   const credsRef = useRef({ domain: "", username: "", password: "" });
@@ -240,11 +241,11 @@ export function VoiceAgent() {
         const start = Date.now();
         const waitForAudio = () => {
           const now = Date.now();
-          const remainingMs = Math.max(0, (aiOutputNextTimeRef.current * 1000) - (audioContext?.currentTime || 0) * 1000);
+          const remainingMs = Math.max(0, (aiOutputNextTimeRef.current * 1000) - (aiAudioContextRef.current?.currentTime || 0) * 1000);
           if (remainingMs > 0 && (now - start) < maxWait) {
             setTimeout(waitForAudio, 200);
           } else {
-            hangUpSIP();
+            hangUpSIPRef.current?.();
           }
         };
         waitForAudio();
@@ -1000,6 +1001,7 @@ export function VoiceAgent() {
     }
     cleanupCall();
   }, [cleanupCall]);
+  hangUpSIPRef.current = hangUpSIP;
 
   /* =========================================================
      DISCONNECT SIP (hang up, unregister, stop agent)
