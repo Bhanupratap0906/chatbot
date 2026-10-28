@@ -16,6 +16,7 @@ exceptions escape to the LLM loop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
@@ -422,6 +423,31 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                     "Apologize and ask the patient to choose another date."
                 )
 
+            if not _is_exact_time(appointment_time) and candidate_times:
+                speakable = []
+                for t in candidate_times[:2]:
+                    try:
+                        speakable.append(datetime.strptime(t, "%H:%M").strftime("%I:%M %p").lstrip("0"))
+                    except ValueError:
+                        speakable.append(t)
+                return (
+                    "Available times on " + _format_date_for_speech(appointment_date) + ": "
+                    + ", ".join(speakable)
+                    + ". Ask the patient which they prefer."
+                )
+
+            # Idempotency: don't double-book on a retry after a timeout.
+            if patient and isinstance(patient, dict) and patient.get("patientId") and candidate_times:
+                if await self._has_existing_appointment(token, api, patient, appointment_date, candidate_times[0], service_id):
+                    return (
+                        f"An appointment for {patient_name} on {_format_date_for_speech(appointment_date)} "
+                        f"at {_format_time_for_speech(candidate_times[0])} is already booked."
+                    )
+
+            lock = await self._session_booking_lock(token)
+            async with lock:
+                pass
+
             last_error: Optional[str] = None
             for attempt_time in candidate_times[:5]:
                 try:
@@ -483,12 +509,12 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                         "tell the patient the slot may no longer be available, and ask "
                         "them to pick another time."
                     )
-                except Exception as error:
-                    logger.warning("booking failed at %s: %r", attempt_time, error, exc_info=True)
-                    return "Booking failed due to a technical issue. Apologize briefly and ask the patient to confirm the details so you can try again."
                 except ValueError as error:
                     logger.warning("invalid time %s: %r", attempt_time, error)
                     continue
+                except Exception as error:
+                    logger.warning("booking failed at %s: %r", attempt_time, error, exc_info=True)
+                    return "Booking failed due to a technical issue. Apologize briefly and ask the patient to confirm the details so you can try again."
 
             return (
                 f"The appointment could not be booked ({last_error}). All attempted "
@@ -597,7 +623,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             # The patient described an issue, but configured portal data has
             # no matching service. If the catalog is small, return the list of
             # service names so the model can ask the caller to choose.
-            if len(items) <= 3:
+            if len(all_items) <= 3:
                 names = ", ".join(str(i.get("procedureDescription", "")).strip() for i in items if i.get("procedureDescription"))
                 return None, "__SERVICES__:" + names
             return None, ""
@@ -671,6 +697,69 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
         if operatories:
             return int(operatories[0].get("id"))
         return None
+
+    async def _session_booking_lock(self, token: str):
+        global _BOOKING_LOCKS, _BOOKING_LOCKS_GUARD
+        if "_BOOKING_LOCKS" not in globals():
+            _BOOKING_LOCKS = {}
+            _BOOKING_LOCKS_GUARD = asyncio.Lock()
+        async with _BOOKING_LOCKS_GUARD:
+            if token not in _BOOKING_LOCKS:
+                _BOOKING_LOCKS[token] = asyncio.Lock()
+            return _BOOKING_LOCKS[token]
+
+    async def _has_existing_appointment(
+        self, token: str, api: CustomerPortalHttpClient, patient: dict,
+        appointment_date: str, appointment_time: str, service_id: Optional[int],
+    ) -> bool:
+        try:
+            payload = {
+                "perPage": 20,
+                "page": 1,
+                "filter": {
+                    "startDate": appointment_date,
+                    "endDate": appointment_date,
+                    "status": [],
+                    "providerName": [],
+                    "services": [],
+                },
+                "sortKey": "startTime",
+                "sortValue": "asc",
+                "search": str(patient.get("name") or ""),
+            }
+            envelope = await api.list_appointments(token, payload)
+        except Exception:
+            return False
+        data = envelope.get("data") or {}
+        items = data.get("data") if isinstance(data, dict) else None
+        items = items or []
+        target_patient = str(patient.get("patientId") or patient.get("id") or "")
+        target_hm = None
+        for fmt in _TIME_FORMATS:
+            try:
+                target_hm = datetime.strptime(appointment_time.strip().upper(), fmt).strftime("%H:%M")
+                break
+            except ValueError:
+                continue
+        for item in items:
+            p = item.get("patient") or {}
+            pid = str(p.get("id") or p.get("patientId") or "")
+            if target_patient and pid and pid != target_patient:
+                continue
+            start = str(item.get("startTime") or "")
+            existing_hm = start[11:16] if len(start) >= 16 else ""
+            try:
+                existing_hm = datetime.fromisoformat(start.replace("Z", "+00:00")).strftime("%H:%M")
+            except ValueError:
+                pass
+            if target_hm and existing_hm and target_hm != existing_hm:
+                continue
+            if service_id is not None:
+                procs = item.get("procedureList") or []
+                if not any(int(x.get("procedureId") or x.get("id") or -1) == int(service_id) for x in procs):
+                    continue
+            return True
+        return False
 
     @staticmethod
     def _build_appointment_booking_payload(
