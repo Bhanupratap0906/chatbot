@@ -15,6 +15,7 @@ import uvicorn
 
 from modules.portal.appointments_router import router as appointments_router
 from modules.portal.auth_router import router as auth_router
+from modules.sip.sip_credentials_router import router as sip_router
 from modules.common.settings import get_settings
 from modules.realtime.voice_websocket_controller import router as voice_router
 
@@ -75,6 +76,7 @@ app.include_router(voice_router)
 # and the appointment list/details/book proxies that replay it as Bearer.
 app.include_router(auth_router)
 app.include_router(appointments_router)
+app.include_router(sip_router)
 
 
 def start_fastapi_server():

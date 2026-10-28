@@ -101,6 +101,11 @@ class Settings:
     portal_location_id: str = field(
         default_factory=lambda: os.getenv("PORTAL_LOCATION_ID", "")
     )
+    # SIP gateway credentials (server-side only; served via /api/sip/credentials).
+    sip_ws_url: str = field(default_factory=lambda: os.getenv("SIP_WS_URL", os.getenv("NEXT_PUBLIC_SIP_WS", "")))
+    sip_domain: str = field(default_factory=lambda: os.getenv("SIP_DOMAIN", os.getenv("NEXT_PUBLIC_SIPDOMAIN", "")))
+    sip_username: str = field(default_factory=lambda: os.getenv("SIP_USERNAME", os.getenv("NEXT_PUBLIC_SIPUSERNAME", "")))
+    sip_password: str = field(default_factory=lambda: os.getenv("SIP_PASSWORD", os.getenv("NEXT_PUBLIC_SIPPASSWORD", "")))
     portal_location_encryption_key: str = field(
         default_factory=lambda: os.getenv("PORTAL_LOCATION_ENCRYPTION_KEY", "")
     )
