@@ -204,7 +204,16 @@ class ConversationWorkflow:
             (index for index in range(len(history) - 1, -1, -1) if isinstance(history[index], HumanMessage)),
             -1,
         )
-        conversation = history
+        from langchain_core.messages import trim_messages
+
+        conversation = trim_messages(
+            history,
+            max_tokens=4000,
+            strategy="last",
+            token_counter="approximate",
+            include_system=True,
+            start_on="human",
+        )
         agent_name = (
             self._turn_assigned_agent
             if state.get("turn_id") == self._turn_id and self._turn_assigned_agent
@@ -480,6 +489,10 @@ class ConversationWorkflow:
                 if isinstance(message, ToolMessage)
                 and message.tool_call_id in {call["id"] for call in calls_to_run}
             ]
+            for tool_message in new_tool_messages:
+                content = str(tool_message.content)
+                if len(content) > 2000:
+                    tool_message.content = content[:2000] + "...[truncated]" 
             for tool_message in new_tool_messages:
                 content = str(tool_message.content).lower()
                 if any(marker in content for marker in ("not found", "failed", "could not", "unreachable", "not signed in")):
