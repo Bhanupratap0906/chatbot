@@ -66,8 +66,8 @@ class ConversationWorkflow:
                 model=self.model,
                 temperature=0,
                 max_tokens=settings.llm_max_tokens,
-                max_retries=0,
-                timeout=15,
+                max_retries=2,
+                timeout=30,
                 reasoning_format="hidden",
                 reasoning_effort="low",
             )

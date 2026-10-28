@@ -48,6 +48,7 @@ class Settings:
     deepgram_api_key: str = field(default_factory=lambda: os.getenv("DEEPGRAM_API_KEY", ""))
     groq_api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
     groq_model: str = field(default_factory=lambda: os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"))
+    groq_fallback_model: str = field(default_factory=lambda: os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant"))
     groq_input_price_per_million: float = field(
         default_factory=lambda: float(os.getenv("GROQ_INPUT_PRICE_PER_MILLION", "0.075"))
     )

@@ -108,6 +108,10 @@ class CustomerPortalHttpClient:
             timeout=timeout or settings.portal_timeout
         )
         self._cache: TTLCache[str, dict] = TTLCache(maxsize=256, ttl=300.0)
+        self._cb_failures = 0
+        self._cb_open_until = 0.0
+        self._cb_threshold = 5
+        self._cb_cooldown = 30.0
 
     # ---------- transport ----------
 
@@ -144,38 +148,65 @@ class CustomerPortalHttpClient:
         params: Optional[dict] = None,
     ) -> dict:
         """Perform one portal call; return the envelope or raise a typed error."""
+        import time as _time
+        import asyncio as _asyncio
+
         headers = {"Authorization": f"Bearer {token}"} if token else None
-        log = _ApiCallLog(method, self._build_portal_url(path))
+        url = self._build_portal_url(path)
+        log = _ApiCallLog(method, url)
         log.request(json=json, params=params)
-        try:
-            response = await self._http.request(
-                method,
-                self._build_portal_url(path),
-                json=json,
-                params=params,
-                headers=headers,
-            )
-        except httpx.HTTPError as error:
-            log.network_error(error)
-            raise PortalNetworkError(f"Cannot reach portal: {error}") from error
 
-        body = _try_json(response)
-        try:
-            self._raise_portal_error_for_envelope(response.status_code, body)
-        except PortalApiError as error:
-            log.fail(response.status_code, body, str(error))
-            raise
+        # Circuit breaker: fail fast while the portal is known to be down.
+        if self._cb_open_until and _time.time() < self._cb_open_until:
+            raise PortalNetworkError("Portal circuit breaker open; retry later.")
 
-        if not isinstance(body, dict):
-            log.fail(response.status_code, body, "non-JSON response")
-            raise PortalApiError(
-                "Portal returned a non-JSON response",
-                status_code=response.status_code,
-            )
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self._http.request(
+                    method,
+                    url,
+                    json=json,
+                    params=params,
+                    headers=headers,
+                    timeout=self._http.timeout,
+                )
+                body = _try_json(response)
+                try:
+                    self._raise_portal_error_for_envelope(response.status_code, body)
+                except PortalApiError as error:
+                    log.fail(response.status_code, body, str(error))
+                    raise
 
-        log.ok(response.status_code, body)
-        _append_portal_api_call_to_audit(self._method if False else method, self._build_portal_url(path), response.status_code, json, params, body)
-        return body
+                if not isinstance(body, dict):
+                    log.fail(response.status_code, body, "non-JSON response")
+                    raise PortalApiError(
+                        "Portal returned a non-JSON response",
+                        status_code=response.status_code,
+                    )
+
+                log.ok(response.status_code, body)
+                self._cb_failures = 0
+                self._cb_open_until = 0.0
+                _append_portal_api_call_to_audit(method, url, response.status_code, json, params, body)
+                return body
+            except (httpx.HTTPError, PortalNetworkError) as error:
+                last_error = error
+                log.network_error(error) if isinstance(error, httpx.HTTPError) else None
+                if attempt < 2:
+                    await _asyncio.sleep(0.2 * (2 ** attempt))
+                    continue
+                break
+            except PortalApiError:
+                raise
+
+        # All retries exhausted.
+        self._cb_failures += 1
+        if self._cb_failures >= self._cb_threshold:
+            self._cb_open_until = _time.time() + self._cb_cooldown
+        if isinstance(last_error, httpx.HTTPError):
+            raise PortalNetworkError(f"Cannot reach portal: {last_error}") from last_error
+        raise last_error if last_error is not None else PortalNetworkError("Portal request failed")
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""
