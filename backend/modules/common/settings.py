@@ -99,6 +99,15 @@ class Settings:
     api_log_bodies: bool = field(
         default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), True)
     )
+    allowed_origins: list[str] = field(
+        default_factory=lambda: [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+    )
+    max_call_seconds: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CALL_SECONDS", "600"))
+    )
+    max_concurrent_calls_per_ip: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CONCURRENT_CALLS_PER_IP", "5"))
+    )
 
 
 @lru_cache(maxsize=1)

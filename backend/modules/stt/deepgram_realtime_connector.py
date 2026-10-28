@@ -53,7 +53,7 @@ class DeepgramRealtimeConnector(RealtimeConnector):
         url = build_listen_url(self._sample_rate)
         headers = {"Authorization": f"Token {self._api_key}"}
         try:
-            return await websockets.connect(url, additional_headers=headers, max_size=None)
+            return await websockets.connect(url, additional_headers=headers, max_size=1024 * 1024)
         except TypeError:
             # websockets < 14 uses extra_headers
-            return await websockets.connect(url, extra_headers=headers, max_size=None)
+            return await websockets.connect(url, extra_headers=headers, max_size=1024 * 1024)
