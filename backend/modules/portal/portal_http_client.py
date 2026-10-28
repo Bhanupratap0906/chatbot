@@ -30,7 +30,7 @@ from contextvars import ContextVar
 from typing import Any, Optional
 
 import httpx
-
+from cachetools import TTLCache
 from modules.common.settings import get_settings
 from modules.portal.dtos import (
     AppointmentBookRequestDTO,
@@ -107,8 +107,7 @@ class CustomerPortalHttpClient:
         self._http = http or httpx.AsyncClient(
             timeout=timeout or settings.portal_timeout
         )
-        self._cache: dict[str, tuple[float, dict]] = {}
-        self._cache_ttl = 300.0
+        self._cache: TTLCache[str, dict] = TTLCache(maxsize=256, ttl=300.0)
 
     # ---------- transport ----------
 
@@ -265,14 +264,17 @@ class CustomerPortalHttpClient:
 
     async def get_appointment_master_data(self, token: str) -> dict:
         """Aggregated reasons/providers/operatories for appointment booking."""
-        import time as _time
+        import hashlib
 
-        key = f"master:{token[:12]}"
-        cached = self._cache.get(key)
-        if cached and (_time.time() - cached[0]) < self._cache_ttl:
-            return cached[1]
+        from modules.portal.session import extract_location_id_from_jwt
+        from modules.common.settings import get_settings
+
+        location_id = extract_location_id_from_jwt(token) or get_settings().portal_location_id or ""
+        key = f"master:{location_id}:{hashlib.sha256(token.encode()).hexdigest()}"
+        if key in self._cache:
+            return self._cache[key]
         result = await self.request("GET", "/appointments/getAppointmentMasterData", token=token)
-        self._cache[key] = (_time.time(), result)
+        self._cache[key] = result
         return result
 
     async def get_procedure_master_list(
@@ -287,12 +289,18 @@ class CustomerPortalHttpClient:
         search: str | None = None,
     ) -> dict:
         """Paginated procedure (service) master list with providers/operatories."""
-        import time as _time
+        import hashlib
 
-        key = f"proc:{token[:12]}:{page}:{per_page}:{sort_key}:{sort_value}:{is_active}:{search}"
-        cached = self._cache.get(key)
-        if cached and (_time.time() - cached[0]) < self._cache_ttl:
-            return cached[1]
+        from modules.portal.session import extract_location_id_from_jwt
+        from modules.common.settings import get_settings
+
+        location_id = extract_location_id_from_jwt(token) or get_settings().portal_location_id or ""
+        key = (
+            f"proc:{location_id}:{hashlib.sha256(token.encode()).hexdigest()}:"
+            f"{page}:{per_page}:{sort_key}:{sort_value}:{is_active}:{search}"
+        )
+        if key in self._cache:
+            return self._cache[key]
         params: dict[str, Any] = {
             "page": page,
             "perPage": per_page,
@@ -306,7 +314,7 @@ class CustomerPortalHttpClient:
         result = await self.request(
             "GET", "/appointments/getProcedureMasterList", token=token, params=params
         )
-        self._cache[key] = (_time.time(), result)
+        self._cache[key] = result
         return result
 
     async def get_patient_list_data(
