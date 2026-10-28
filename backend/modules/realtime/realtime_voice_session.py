@@ -440,35 +440,75 @@ class RealtimeVoiceSession:
 
     # ---------- Deepgram -> pipeline ----------
 
+    async def _process_deepgram_event(self, raw: str) -> None:
+        """Handle one Deepgram event (extracted for reconnect support)."""
+        event = json.loads(raw)
+        kind = event.get("type")
+        if kind == "SpeechStarted":
+            if self._settings.barge_in:
+                logger.info("stt speech started -> cancelling turn")
+                self._cancel_prompt_caller_after_silence()
+                await self.cancel_active_assistant_turn()
+        elif kind == "Results":
+            alt = event["channel"]["alternatives"][0]
+            transcript = alt.get("transcript", "").strip()
+            is_final = event.get("is_final", False)
+            speech_final = event.get("speech_final", False)
+            if transcript:
+                await self._publisher.send_json(
+                    {"type": "transcript", "text": transcript, "final": is_final}
+                )
+            if is_final and transcript:
+                self._buffer.add_final_transcript(transcript)
+            if speech_final:
+                logger.info("stt speech_final")
+                await self.start_assistant_turn_from_buffer()
+        elif kind == "UtteranceEnd":
+            logger.info("stt utterance end")
+            await self.start_assistant_turn_from_buffer()
+        elif kind == "Error" or event.get("error"):
+            logger.warning("stt error: %s", raw)
+
+    async def _speak_fallback_and_escalate(self) -> None:
+        """Speak the unrecoverable-STT fallback and escalate the call."""
+        fallback = "I'm having trouble, let me connect you to the front desk."
+        try:
+            await self._publisher.send_json({"type": "transcript", "text": fallback, "final": True})
+        except Exception:
+            pass
+        try:
+            await self.tts.speak(fallback, self.voice, self._publisher.send_bytes)
+        except Exception as error:
+            logger.warning("fallback tts failed: %r", error)
+        self.turns._hangup = True
+        self.hangup_requested = True
+
     async def pump_deepgram_events_to_turns(self):
         """Translate Deepgram events into frontend transcripts and assistant turns; run as a session task."""
-        async for raw in self.dg:
-            event = json.loads(raw)
-            kind = event.get("type")
-            if kind == "SpeechStarted":
-                if self._settings.barge_in:
-                    logger.info("stt speech started -> cancelling turn")
-                    self._cancel_prompt_caller_after_silence()
-                    await self.cancel_active_assistant_turn()
-            elif kind == "Results":
-                alt = event["channel"]["alternatives"][0]
-                transcript = alt.get("transcript", "").strip()
-                is_final = event.get("is_final", False)
-                speech_final = event.get("speech_final", False)
-                if transcript:
-                    await self._publisher.send_json(
-                        {"type": "transcript", "text": transcript, "final": is_final}
+        attempts = 0
+        while True:
+            try:
+                async for raw in self.dg:
+                    await self._process_deepgram_event(raw)
+                break
+            except Exception as error:
+                logger.warning("deepgram socket dropped: %r", error)
+                if attempts >= 1:
+                    await self._speak_fallback_and_escalate()
+                    break
+                attempts += 1
+                try:
+                    from modules.stt.deepgram_realtime_connector import DeepgramRealtimeConnector
+
+                    connector = DeepgramRealtimeConnector(
+                        api_key=self._settings.deepgram_api_key,
+                        input_sample_rate=self._settings.input_sample_rate,
                     )
-                if is_final and transcript:
-                    self._buffer.add_final_transcript(transcript)
-                if speech_final:
-                    logger.info("stt speech_final")
-                    await self.start_assistant_turn_from_buffer()
-            elif kind == "UtteranceEnd":
-                logger.info("stt utterance end")
-                await self.start_assistant_turn_from_buffer()
-            elif kind == "Error" or event.get("error"):
-                logger.warning("stt error: %s", raw)
+                    self.dg = await connector.connect_to_deepgram_realtime()
+                except Exception as reconnect_error:
+                    logger.error("deepgram reconnect failed: %r", reconnect_error)
+                    await self._speak_fallback_and_escalate()
+                    break
 
     async def keep_deepgram_connection_alive(self):
         """Periodically keep Deepgram's realtime socket alive; run alongside the two websocket pumps."""
