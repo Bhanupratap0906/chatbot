@@ -12,7 +12,6 @@ those to the LangChain ``@tool`` contract, so:
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from typing import Any
+from collections.abc import Mapping
 
 
 class _UsageCapturingAsyncClient:
@@ -35,5 +34,3 @@ class _UsageCapturingAsyncClient:
                 yield chunk
 
         return with_usage()
-PY
-echo done
