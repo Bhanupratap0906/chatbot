@@ -23,6 +23,7 @@ from modules.portal.session import extract_location_id_from_jwt
 from modules.portal.token_store import portal_token_store
 from modules.realtime.realtime_voice_session import RealtimeVoiceSession
 from modules.stt.deepgram_realtime_connector import DeepgramRealtimeConnector
+from modules.workflow.conversation_workflow_graph import release_thread
 from modules.tts.voice_catalog import SAMPLE_RATE as TTS_SAMPLE_RATE
 from modules.tts.voice_catalog import VOICES
 
@@ -69,6 +70,10 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
         await dg.close()
         try:
             await ws.close()
+        except Exception:
+            pass
+        try:
+            release_thread(session.session_id)
         except Exception:
             pass
         session.costs.print_summary()

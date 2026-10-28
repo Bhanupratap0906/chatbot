@@ -138,6 +138,11 @@ class ConversationWorkflow:
         self.history_messages = []
 
     @staticmethod
+    def release_thread(thread_id: str) -> None:
+        """Free the checkpoint store for a finished conversation thread."""
+        release_thread(thread_id)
+
+    @staticmethod
     def _assigned_role(name: str) -> AgentRole | None:
         return next((role for role in AGENT_ROLES.values() if role.name == name), None)
 
@@ -691,3 +696,12 @@ _CHECKPOINTS: dict[str, InMemorySaver] = {}
 def _get_or_create_thread_checkpointer(thread_id: str) -> InMemorySaver:
     """Return the saver dedicated to a conversation's thread id."""
     return _CHECKPOINTS.setdefault(thread_id, InMemorySaver())
+
+def release_thread(thread_id: str) -> None:
+    """Free the checkpoint store for a finished conversation thread.
+
+    Prevents a later call from inheriting an earlier caller's conversation
+    when thread ids are reused, and releases the held InMemorySaver.
+    """
+    _CHECKPOINTS.pop(thread_id, None)
+

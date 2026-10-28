@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -327,7 +328,7 @@ class RealtimeVoiceSession:
         self.api_calls: list[dict] = []
         from modules.portal.portal_http_client import set_api_audit
         self._api_audit_token = set_api_audit(self.api_calls)
-        self.session_id = str(id(self))
+        self.session_id = str(uuid.uuid4())
         # DIP: concrete defaults keep old ``RealtimeVoiceSession(ws, dg)`` working,
         # but tests/callers may inject fakes (LSP).
         if llm is None:
