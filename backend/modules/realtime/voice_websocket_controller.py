@@ -62,6 +62,15 @@ async def _release_connection_slot(ip: str) -> None:
                 del _active_connections[ip]
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    try:
+        exc = task.exception()
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        return
+    if exc is not None:
+        logger.warning("send_configured_greeting failed: %r", exc)
+
+
 def _origin_allowed(origin: Optional[str], allowed: list[str]) -> bool:
     if "*" in allowed:
         return True
@@ -93,7 +102,8 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
     ]
     # Runs once and finishes on its own — must not be in the FIRST_COMPLETED
     # race below, or the session tears down the instant the greeting ends.
-    asyncio.create_task(session.send_configured_greeting())
+    greeting_task = asyncio.create_task(session.send_configured_greeting())
+    greeting_task.add_done_callback(_log_task_exception)
     settings = session._settings
     try:
         done, pending = await asyncio.wait(
@@ -106,6 +116,7 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
             if exc and not isinstance(exc, WebSocketDisconnect):
                 logger.warning("session ended: %r", exc)
     finally:
+        greeting_task.cancel()
         turn = session.turn
         if turn and not turn.done():
             turn.cancel()
