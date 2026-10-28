@@ -143,14 +143,14 @@ class ConversationWorkflow:
 
     def _build_graph(self):
         graph = StateGraph(WorkflowState)
-        graph.add_node("respond", self._generate_agent_response)
-        graph.add_node("tools", self._execute_requested_tools)
-        graph.add_node("record_turn", self._finalize_turn_response)
-        graph.add_node("tool_limit", self._handle_tool_limit_reached)
+        graph.add_node("respond", self._respond)
+        graph.add_node("tools", self._tools)
+        graph.add_node("record_turn", self._record_turn)
+        graph.add_node("tool_limit", self._tool_limit)
         graph.add_edge(START, "respond")
         graph.add_conditional_edges(
             "respond",
-            self._route_after_agent_response,
+            self._route_after_response,
             {"tools": "tools", "done": "record_turn"},
         )
         graph.add_edge("tools", "respond")
@@ -629,7 +629,7 @@ class ConversationWorkflow:
                                 deferral_terms = ("call you back", "scheduling team", "staff will", "call you later", "forward your request")
                                 is_deferral = any(term in lowered for term in deferral_terms)
                                 import re as _re
-                                claims_booking = bool(_re.search(r"\\b(is|has been|have been|you're|you are) (booked|scheduled|all set|confirmed)\\b|\\bi('ve| have) booked\\b", lowered))
+                                claims_booking = bool(_re.search(r"\b(is|has been|have been|you're|you are) (booked|scheduled|all set|confirmed)\b|\bi('ve| have) booked\b", lowered))
                                 if (not self._booked_this_turn and (claims_booking or is_deferral)):
                                     piece = (
                                         "I haven't booked that yet. Let me confirm the details with you first."
