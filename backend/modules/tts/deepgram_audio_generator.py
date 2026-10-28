@@ -59,8 +59,6 @@ class DeepgramAudioGenerator:
 
     def generate_audio_chunks(self, text: str, voice: str) -> Iterable[bytes]:
         """Blocking generator of linear16 chunks with WAV fallback."""
-        if self._cost_tracker is not None:
-            self._cost_tracker.add_tts_text(text, voice)
         if self._raw_pcm_supported is None:
             try:
                 response = self._request_audio_from_deepgram(text, voice, raw=True)
@@ -68,6 +66,8 @@ class DeepgramAudioGenerator:
                 first = next(iterator)
                 self._raw_pcm_supported = True
                 if first:
+                    if self._cost_tracker is not None:
+                        self._cost_tracker.add_tts_text(text, voice)
                     yield first
                 for chunk in iterator:
                     if chunk:
@@ -80,6 +80,10 @@ class DeepgramAudioGenerator:
                 logger.warning("Deepgram rejected raw PCM, falling back to WAV: %r", error)
                 self._raw_pcm_supported = False
 
+        _counted = False
         for chunk in self._request_audio_from_deepgram(text, voice, raw=self._raw_pcm_supported):
             if chunk:
+                if not _counted and self._cost_tracker is not None:
+                    self._cost_tracker.add_tts_text(text, voice)
+                    _counted = True
                 yield chunk
