@@ -14,6 +14,7 @@ from pathlib import Path
 # Never put real API keys here.
 os.environ.setdefault("GROQ_API_KEY", "test-groq-api-key")
 os.environ.setdefault("DEEPGRAM_API_KEY", "test-deepgram-api-key")
+os.environ.setdefault("PORTAL_LOCATION_ENCRYPTION_KEY", "test-portal-location-encryption-key")
 
 # Make ``import main`` (and ``modules.*``) work regardless of the pytest rootdir.
 BACKEND_DIR = Path(__file__).resolve().parents[1]

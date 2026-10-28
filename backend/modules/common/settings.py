@@ -26,6 +26,14 @@ def _load_env_once() -> None:
 _load_env_once()
 
 
+def _require_env(name: str) -> str:
+    """Fail fast when a required environment variable is missing."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
 def _as_bool(value: str | None, default: bool = False) -> bool:
     """Interpret common environment values as booleans when settings are created."""
     if value is None:
@@ -93,11 +101,20 @@ class Settings:
     portal_location_id: str = field(
         default_factory=lambda: os.getenv("PORTAL_LOCATION_ID", "")
     )
+    portal_location_encryption_key: str = field(
+        default_factory=lambda: os.getenv("PORTAL_LOCATION_ENCRYPTION_KEY", "")
+    )
     portal_appointment_duration_minutes: int = field(
         default_factory=lambda: int(os.getenv("PORTAL_APPOINTMENT_DURATION_MINUTES", "30"))
     )
     api_log_bodies: bool = field(
         default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), True)
+    )
+    cookie_secure: bool = field(
+        default_factory=lambda: _as_bool(os.getenv("COOKIE_SECURE"), True)
+    )
+    cookie_samesite: str = field(
+        default_factory=lambda: os.getenv("COOKIE_SAMESITE", "lax")
     )
     allowed_origins: list[str] = field(
         default_factory=lambda: [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]

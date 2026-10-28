@@ -7,12 +7,15 @@ booking, and tool logs all flow through this format.
 
 import logging
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from modules.portal.appointments_router import router as appointments_router
 from modules.portal.auth_router import router as auth_router
+from modules.common.settings import get_settings
 from modules.realtime.voice_websocket_controller import router as voice_router
 
 
@@ -34,8 +37,19 @@ def configure_structured_application_logging() -> None:
 
 configure_structured_application_logging()
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    if not settings.portal_location_encryption_key:
+        raise RuntimeError(
+            "Missing required environment variable: PORTAL_LOCATION_ENCRYPTION_KEY"
+        )
+    yield
+
+
 app = FastAPI(
     title="Voice AI",
+    lifespan=lifespan,
 )
 
 
