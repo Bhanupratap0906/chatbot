@@ -72,7 +72,7 @@ async def list_appointments(
         ).validated()
     except DtoValidationError as error:
         return _dto_error(str(error))
-    return await client.list_appointments(token, request)
+    return await client.list_appointments(token, request.to_payload())
 
 
 @router.get("/{appointment_id}")

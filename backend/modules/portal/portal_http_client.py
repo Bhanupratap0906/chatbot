@@ -326,10 +326,6 @@ class CustomerPortalHttpClient:
             params["alphabet"] = alphabet
         return await self.request("GET", "/patient/list-data", token=token, params=params)
 
-    async def list_appointments(self, token: str, payload: dict) -> dict:
-        """List appointments (POST /appointments/listAllApppointments)."""
-        return await self.request("POST", "/appointments/listAllApppointments", token=token, json=payload)
-
     async def create_patient(self, token: str, payload: dict) -> dict:
         """Create a patient record (POST /patient)."""
         return await self.request("POST", "/patient", token=token, json=payload)
