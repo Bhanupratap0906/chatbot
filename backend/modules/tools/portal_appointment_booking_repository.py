@@ -33,6 +33,7 @@ from modules.portal.dtos import (
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
 from modules.portal.session import resolve_active_location_id, encrypt_location_id_for_portal
 from modules.portal.token_store import PortalTokenStore, portal_token_store
+from modules.common.redact import redact
 
 logger = logging.getLogger("booking")
 
@@ -281,7 +282,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                 if patient is None:
                     logger.warning("failed: patient record was not found")
                     return (
-                        f"No patient record found for phone number {mobile_number}. "
+                        f"No patient record found for phone number {redact(mobile_number)}. "
                         "To book, I'll need the patient's date of birth (YYYY-MM-DD) "
                         "and gender (male/female/other) to create a record, or "
                         "they can register at the front desk."

@@ -113,7 +113,7 @@ class Settings:
         default_factory=lambda: int(os.getenv("PORTAL_APPOINTMENT_DURATION_MINUTES", "30"))
     )
     api_log_bodies: bool = field(
-        default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), True)
+        default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), False)
     )
     cookie_secure: bool = field(
         default_factory=lambda: _as_bool(os.getenv("COOKIE_SECURE"), True)

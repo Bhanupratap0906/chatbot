@@ -27,6 +27,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from modules.common.conversation_cost_tracker import ConversationCostTracker
 from modules.common.backend_contracts import ChunkSplitter, ConversationHistory, LlmAssistant, MessagePublisher
 from modules.common.settings import Settings, get_settings
+from modules.common.redact import redact
 from modules.llm.sentence_chunk_splitter import SentenceChunkSplitter
 from modules.realtime.greeting_service import GreetingService
 from modules.realtime.conversation_history import InMemoryConversationHistory
@@ -184,7 +185,7 @@ class AssistantTurnManager:
             nonlocal first_logged
             if not first_logged:
                 first_logged = True
-                logger.info("tts first audio at %s for %r", elapsed(), text)
+                logger.info("tts first audio at %s for %r", elapsed(), redact(text))
             await publisher.send_bytes(chunk)
 
         await self._tts.speak(text, voice, send_with_log)
@@ -198,7 +199,7 @@ class AssistantTurnManager:
             return f"{time.perf_counter() - started:.2f}s"
 
         try:
-            logger.info("turn start: %r", text)
+            logger.info("turn start: %r", redact(text))
             self._current_text = text
             await self._publisher.send_json({"type": "user", "text": text})
             await self._publisher.send_json({"type": "answer_start"})
@@ -279,7 +280,7 @@ class AssistantTurnManager:
                 self._history.add_turn(text, answer)
             self._rate_limited = False
             self._current_text = ""
-            logger.info("turn done at %s: %r", elapsed(), answer)
+            logger.info("turn done at %s: %r", elapsed(), redact(answer))
             if self._on_complete is not None:
                 try:
                     await self._on_complete(answer)
@@ -433,8 +434,8 @@ class RealtimeVoiceSession:
                     call.get("method"),
                     call.get("url"),
                     call.get("status"),
-                    call.get("request"),
-                    call.get("response"),
+                    redact(call.get("request")),
+                    redact(call.get("response")),
                 )
 
     # ---------- Deepgram -> pipeline ----------
@@ -489,7 +490,7 @@ class RealtimeVoiceSession:
         words = text.lower().split()
         if self.turns.task is not None and not self.turns.task.done():
             if len(words) <= 2 or all(w.strip(".,!?") in self._BACKCHANNELS for w in words):
-                logger.info("ignoring backchannel/short utterance while speaking: %r", text)
+                logger.info("ignoring backchannel/short utterance while speaking: %r", redact(text))
                 return
         await self.turns.start_assistant_turn(text)
 
@@ -555,7 +556,7 @@ class _SpeakerAdapter:
             nonlocal first_logged
             if not first_logged:
                 first_logged = True
-                logger.info("tts first audio at %s for %r", elapsed(), text)
+                logger.info("tts first audio at %s for %r", elapsed(), redact(text))
             await self._session._publisher.send_bytes(chunk)
 
         await self._session.tts.speak(text, voice, send_with_log)

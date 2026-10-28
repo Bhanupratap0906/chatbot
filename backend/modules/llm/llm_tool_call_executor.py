@@ -17,6 +17,8 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
+from modules.common.redact import redact
+
 logger = logging.getLogger("tool")
 
 
@@ -43,7 +45,7 @@ class LlmToolCallExecutor:
         for tool_call in response.tool_calls or []:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"] or {}
-            logger.info("executing tool=%s args=%s", tool_name, tool_args)
+            logger.info("executing tool=%s args=%s", tool_name, redact(tool_args))
 
             if tool_name == "book_appointment":
                 await self._validate_and_execute_booking(tool_call, tool_args, messages)
@@ -64,7 +66,7 @@ class LlmToolCallExecutor:
             except Exception as error:
                 logger.warning("tool=%s failed: %r", tool_name, error)
                 result = f"{tool_name} failed due to a technical issue. Apologize briefly and continue."
-            logger.info("tool=%s result=%s", tool_name, result)
+            logger.info("tool=%s result=%s", tool_name, redact(result))
             messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
     async def _validate_and_execute_booking(self, tool_call: dict, tool_args: dict[str, Any], messages: list) -> None:
@@ -111,5 +113,5 @@ class LlmToolCallExecutor:
                 "Apologize briefly and ask the patient to "
                 "confirm the details so you can try again."
             )
-        logger.info("tool=book_appointment result=%s", tool_result)
+        logger.info("tool=book_appointment result=%s", redact(tool_result))
         messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_call["id"]))
