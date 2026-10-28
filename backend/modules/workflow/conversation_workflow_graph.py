@@ -22,34 +22,6 @@ from modules.llm.llm_tool_call_executor import LlmToolCallExecutor
 logger = logging.getLogger("workflow.graph")
 
 
-def _normalize_date_str(date_str: str) -> datetime.date | None:
-    import re as _re
-    from datetime import datetime
-    text = (date_str or "").strip()
-    text = _re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text, flags=_re.IGNORECASE)
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%B %d %Y", "%b %d %Y"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _normalize_time_str(time_str: str) -> str | None:
-    from datetime import datetime
-    text = (time_str or "").strip().upper()
-    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
-        try:
-            return datetime.strptime(text, fmt).strftime("%H:%M")
-        except ValueError:
-            continue
-    return None
-
-
-def _normalize_phone_str(phone_str: str) -> str:
-    import re
-    return re.sub(r"\D", "", str(phone_str or ""))
-
 from modules.workflow.conversation_agents import AgentRole, AGENT_ROLES, messages_for_agent, route_to_agent
 
 

@@ -31,7 +31,7 @@ from modules.common.redact import redact
 from modules.llm.sentence_chunk_splitter import SentenceChunkSplitter
 from modules.realtime.greeting_service import GreetingService
 from modules.realtime.conversation_history import InMemoryConversationHistory
-from modules.realtime.conversation_coordinator import ConversationCoordinator, BookingState, BookingResult
+from modules.realtime.conversation_coordinator import ConversationCoordinator, BookingState
 from modules.tts.voice_catalog import VOICES
 
 logger = logging.getLogger("session")

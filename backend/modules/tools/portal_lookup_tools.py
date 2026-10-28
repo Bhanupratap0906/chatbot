@@ -309,8 +309,6 @@ async def get_appointments(
         spoken = start
         try:
             from datetime import datetime
-            from zoneinfo import ZoneInfo
-
             dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             spoken = dt.strftime("%B %d, %Y at %I:%M %p").lstrip("0").replace(" 0", " ")
         except ValueError:

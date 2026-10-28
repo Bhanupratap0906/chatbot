@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 
@@ -148,7 +148,6 @@ class ConversationCoordinator:
             if not self.state.progress_acknowledged and self.state.booking_status == BookingState.BOOKING_IN_PROGRESS:
                 return "Your appointment is still being processed. I'll confirm as soon as I receive the result."
             if self.state.booking_status == BookingState.BOOKING_SUCCEEDED and self.state.latest_booking_result:
-                details = self.state.latest_booking_result.appointment_details or {}
                 msg = self.state.latest_booking_result.message or "Your appointment has been booked."
                 return msg
             if self.state.booking_status == BookingState.BOOKING_FAILED and self.state.latest_booking_result:
