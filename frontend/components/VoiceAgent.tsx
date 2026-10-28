@@ -234,8 +234,20 @@ export function VoiceAgent() {
       } else if (msg.type === "answer_end") {
         setStatus("AI speaking / listening", "success", true);
       } else if (msg.type === "hangup") {
-        setStatus("Connecting you to the clinic team — call ended", "success");
-        void hangUpSIP();
+        setStatus("Call ended — please call the clinic or emergency services if needed", "success");
+        // Wait for queued TTS to finish before hanging up (max 15s cap)
+        const maxWait = 15000;
+        const start = Date.now();
+        const waitForAudio = () => {
+          const now = Date.now();
+          const remainingMs = Math.max(0, (aiOutputNextTimeRef.current * 1000) - (audioContext?.currentTime || 0) * 1000);
+          if (remainingMs > 0 && (now - start) < maxWait) {
+            setTimeout(waitForAudio, 200);
+          } else {
+            hangUpSIP();
+          }
+        };
+        waitForAudio();
       } else if (msg.type === "interrupt") {
         stopTTSPlayback();
       } else if (msg.type === "error") {

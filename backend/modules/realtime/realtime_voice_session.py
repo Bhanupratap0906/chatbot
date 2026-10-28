@@ -209,7 +209,7 @@ class AssistantTurnManager:
             first_token = True
             self._rate_limited = False
             workflow = getattr(self._llm, "workflow", None)
-            stream = workflow.stream_conversation_turn(text, self._history.snapshot()) if workflow else self._llm.stream(text, self._history.snapshot())
+            stream = workflow.stream_conversation_turn(text, self._history.snapshot()) if workflow else self._llm.stream_conversation_turn(text, self._history.snapshot())
             hangup = False
 
             while True:

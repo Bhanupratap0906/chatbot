@@ -21,6 +21,35 @@ from modules.tools import TOOL_REGISTRY
 from modules.llm.llm_tool_call_executor import LlmToolCallExecutor
 logger = logging.getLogger("workflow.graph")
 
+
+def _normalize_date_str(date_str: str) -> datetime.date | None:
+    import re as _re
+    from datetime import datetime
+    text = (date_str or "").strip()
+    text = _re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text, flags=_re.IGNORECASE)
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_time_str(time_str: str) -> str | None:
+    from datetime import datetime
+    text = (time_str or "").strip().upper()
+    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_phone_str(phone_str: str) -> str:
+    import re
+    return re.sub(r"\D", "", str(phone_str or ""))
+
 from modules.workflow.conversation_agents import AgentRole, AGENT_ROLES, messages_for_agent, route_to_agent
 
 
@@ -44,6 +73,7 @@ class WorkflowState(TypedDict, total=False):
     tool_errors: dict[str, str]
     max_tool_rounds: int
     assigned_agent: str
+    pending_booking: dict | None
     handoff_requested: bool
 
 
@@ -95,9 +125,14 @@ class ConversationWorkflow:
         self._graph = self._build_graph()
         self.hangup_requested = False
         self._current_turn_hangup = False
+        self._pending_booking = None
+        self._booked_in_conversation = False
         self._booked_this_turn = False
+        # Conversation-level booking tracking stays (item 4)
         self._booking_confirmation = ""
         self._active_agent = ""
+        self._pending_booking: dict | None = None
+        self._booked_in_conversation = False
         self._turn_id = 0
         self.history_messages: list[BaseMessage] = []
         self.workflow_state: dict[str, Any] = {}
@@ -110,6 +145,8 @@ class ConversationWorkflow:
         self._turn_tool_rounds = 0
         self._turn_assigned_agent = ""
         self._active_agent = ""
+        self._pending_booking: dict | None = None
+        self._booked_in_conversation = False
         self.agent_assignments: list[dict[str, str]] = []
 
     def _get_graph_config(self) -> dict[str, Any]:
@@ -132,6 +169,7 @@ class ConversationWorkflow:
         self._turn_tool_rounds = 0
         self._turn_assigned_agent = ""
         self.agent_assignments = []
+        self._pending_booking = None
         self._current_turn_hangup = False
         self._turn_id = 0
         self.workflow_state = {}
@@ -261,12 +299,16 @@ class ConversationWorkflow:
             return {"messages": [AIMessage(content="HANGUP_CALL")], **assigned}
         if not scoped_tools:
             response = await self.llm.ainvoke(messages)
+            if self.cost_tracker is not None and hasattr(response, "usage_metadata") and response.usage_metadata:
+                self.cost_tracker.add_llm_usage(response.usage_metadata, self.model)
             return {"messages": [response], **assigned}
         if self._turn_tool_rounds >= 3:
             messages.append(SystemMessage(content="Tool calls are exhausted for this turn. Reply now without calling any tools."))
             response = await self.llm.ainvoke(
                 [SystemMessage(content=agent.system_prompt), *messages[1:]]
             )
+            if self.cost_tracker is not None and hasattr(response, "usage_metadata") and response.usage_metadata:
+                self.cost_tracker.add_llm_usage(response.usage_metadata, self.model)
             return {"messages": [response], **assigned}
         try:
             response = await agent_llm.ainvoke(messages)
@@ -278,6 +320,8 @@ class ConversationWorkflow:
             response = await self.llm.ainvoke(
                 [SystemMessage(content=agent.system_prompt), *messages[1:]]
             )
+        if self.cost_tracker is not None and hasattr(response, "usage_metadata") and response.usage_metadata:
+            self.cost_tracker.add_llm_usage(response.usage_metadata, self.model)
         return {"messages": [response], **assigned}
 
     async def _tools(self, state: WorkflowState) -> dict[str, Any]:
@@ -531,6 +575,8 @@ class ConversationWorkflow:
                     self._booked_this_turn = True
                     self._booking_confirmation = str(tool_message.content)
                     self._active_agent = ""
+        self._pending_booking: dict | None = None
+        self._booked_in_conversation = False
         if state.get("turn_id") == self._turn_id:
             self._turn_tool_rounds += 1
             self._current_tool_calls = dict(calls_by_name)
@@ -607,6 +653,7 @@ class ConversationWorkflow:
         self._turn_tool_rounds = 0
         self._current_turn_hangup = False
         self._booked_this_turn = False
+        # Conversation-level booking tracking stays (item 4)
         self._booking_confirmation = ""
 
         input_state: WorkflowState = {

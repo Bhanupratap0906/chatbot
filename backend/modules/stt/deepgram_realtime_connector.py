@@ -44,6 +44,10 @@ class DeepgramRealtimeConnector(RealtimeConnector):
         self._api_key = api_key if api_key is not None else settings.deepgram_api_key
         self._sample_rate = input_sample_rate if input_sample_rate is not None else settings.input_sample_rate
 
+    async def connect(self) -> Any:
+        """Connect to Deepgram realtime (ABC contract)."""
+        return await self.connect_to_deepgram_realtime()
+
     async def connect_to_deepgram_realtime(self) -> Any:
         """Connect and authenticate with Deepgram; called by the voice websocket route."""
         import websockets
@@ -53,7 +57,7 @@ class DeepgramRealtimeConnector(RealtimeConnector):
         url = build_listen_url(self._sample_rate)
         headers = {"Authorization": f"Token {self._api_key}"}
         try:
-            return await websockets.connect(url, additional_headers=headers, max_size=1024 * 1024)
+            return await websockets.connect(url, additional_headers=headers, max_size=None)
         except TypeError:
             # websockets < 14 uses extra_headers
-            return await websockets.connect(url, extra_headers=headers, max_size=1024 * 1024)
+            return await websockets.connect(url, extra_headers=headers, max_size=None)

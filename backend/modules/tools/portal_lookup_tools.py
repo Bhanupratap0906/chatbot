@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from langchain_core.tools import tool
@@ -216,6 +217,19 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
             speakable = datetime.strptime(open_time, "%H:%M").strftime("%I:%M %p").lstrip("0")
         except ValueError:
             speakable = open_time
+        # Drop slots already past in clinic timezone when checking today
+        from modules.common.settings import get_settings
+        settings = get_settings()
+        try:
+            slot_dt = datetime.strptime(str(item.get("open") or "")[:10], "%Y-%m-%d")
+            if slot_dt.date() == datetime.now(ZoneInfo(settings.clinic_timezone)).date():
+                hm = open_time
+                slot_hour, slot_min = int(hm.split(":")[0]), int(hm.split(":")[1])
+                now_h, now_m = datetime.now(ZoneInfo(settings.clinic_timezone)).hour, datetime.now(ZoneInfo(settings.clinic_timezone)).minute
+                if slot_hour < now_h or (slot_hour == now_h and slot_min < now_m + 15):
+                    continue  # skip past / too-close slots
+        except Exception:
+            pass
         if speakable not in times:
             times.append(speakable)
         if len(times) >= 6:
@@ -287,6 +301,7 @@ async def get_appointments(
         spoken = start
         try:
             from datetime import datetime
+            from zoneinfo import ZoneInfo
 
             dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             spoken = dt.strftime("%B %d, %Y at %I:%M %p").lstrip("0").replace(" 0", " ")

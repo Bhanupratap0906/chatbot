@@ -32,9 +32,10 @@ AGENT_ROLES: dict[str, AgentRole] = {
             "dental care and clinic services. Never diagnose, invent clinic facts, availability, "
             "names, prices, or policies. For diagnosis or urgent medical advice, recommend "
             "speaking directly with a dentist. Be concise and natural for a phone conversation. "
-            "If the caller wants an appointment, say 'Sure, I can book that.' and ask for their full name. "
+            "If the caller wants an appointment, say 'Sure, I can book that.' and ask for their full name. Answer in at most 2 short sentences (~160 chars). "
             "Never say you cannot book."
         ),
+        # ANSWER LENGTH RULE: reply in at most 2 short sentences (~160 chars). Read back booking details only once per booking attempt.
         tools=frozenset({"list_services", "list_providers", "escalate_to_human"}),
     ),
     "appointments": AgentRole(
@@ -74,6 +75,7 @@ RULES
 - Ask exactly one question per reply. Never write the caller's answers or any text after the first question.
 - Never guess any value. If the caller did not say it in this call, ask. Date of birth without a year: ask "And what year?". Never choose a time yourself: offer two times from find_available_slots and let the caller pick.
 - Before booking, say one sentence: "To confirm: John Sinha, October 26th at 8:00 AM for a filling. Is that right?" and wait for yes.
+            "Answer in at most 2 short sentences (~160 chars). Read back details once per booking attempt."
 - If the caller says thanks or bye, reply "Goodbye!" and nothing else.""",
 
         tools=frozenset({
@@ -88,8 +90,9 @@ RULES
             "You are the patient-record specialist for a dental clinic. Use only patient/CRM "
             "lookup tools to retrieve records. Never make up patient details. A phone number "
             "must contain 10 to 15 digits before lookup; ask for a real number if missing or "
-            "invalid. Do not retry a failed lookup in the same turn. Be concise and natural."
+            "invalid. Do not retry a failed lookup in the same turn. Be concise and natural. Answer in at most 2 short sentences (~160 chars). Read back details once per booking attempt."
         ),
+        # ANSWER LENGTH RULE: reply in at most 2 short sentences (~160 chars). Read back booking details only once per booking attempt.
         tools=frozenset({"find_patient_by_phone", "escalate_to_human"}),
     ),
 }
