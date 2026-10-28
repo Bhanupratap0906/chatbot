@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+import pytest
+
 from modules.common.emergency import is_emergency, emergency_instruction
 from modules.workflow.conversation_workflow_graph import ConversationWorkflow
 from tests.fake_llm import FakeLLM
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("I have swelling and a fever", True),
+    ("my face is swollen and I have a fever", True),
+    ("I'm having trouble breathing", True),
+    ("I can't swallow", True),
+    ("bleeding that won't stop", True),
+    ("no swelling and no fever", False),
+    ("no, nothing like that", False),
+    ("no trouble breathing", False),
+    ("no fever but I do have a toothache", False),
+    ("I don't have any swelling", False),
+])
+def test_emergency_table(text: str, expected: bool) -> None:
+    assert is_emergency(text) == expected
 
 
 def test_is_emergency_detects_phrases() -> None:
