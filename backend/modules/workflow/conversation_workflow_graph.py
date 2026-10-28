@@ -570,6 +570,13 @@ class ConversationWorkflow:
         if not self.guardrail.is_allowed(text):
             yield "I'm here to help with dental clinic questions and appointments. How can I help?"
             return
+        from modules.common.emergency import is_emergency, emergency_instruction
+
+        if is_emergency(text):
+            yield emergency_instruction(text)
+            self.hangup_requested = True
+            yield "HANGUP_CALL"
+            return
         config = self._get_graph_config()
         state = await self._graph.aget_state(config)
         if self.hangup_requested:
