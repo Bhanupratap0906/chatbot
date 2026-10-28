@@ -116,6 +116,15 @@ class Settings:
     api_log_bodies: bool = field(
         default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), False)
     )
+    langsmith_tracing: bool = field(
+        default_factory=lambda: _as_bool(os.getenv("LANGSMITH_TRACING"), False)
+    )
+    langsmith_api_key: str = field(
+        default_factory=lambda: os.getenv("LANGSMITH_API_KEY", "")
+    )
+    langsmith_project: str = field(
+        default_factory=lambda: os.getenv("LANGSMITH_PROJECT", "voice-dental-clinic")
+    )
     cookie_secure: bool = field(
         default_factory=lambda: _as_bool(os.getenv("COOKIE_SECURE"), True)
     )

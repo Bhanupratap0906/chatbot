@@ -12,3 +12,8 @@ timezone handling:
 
 Until confirmed, `datetime.now()` checks use `settings.clinic_timezone` and
 slot times are treated as clinic-local.
+
+## Compliance
+
+LangSmith is a third-party processor: confirm its data region and retention
+settings before enabling tracing in production.

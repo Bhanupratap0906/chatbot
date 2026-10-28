@@ -18,6 +18,7 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from modules.common.call_context import set_call_id
 from modules.common.settings import get_settings
 from modules.portal.cookie_header_parser import extract_token_from_cookie_header
 from modules.portal.session import extract_location_id_from_jwt
@@ -141,6 +142,7 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
 async def handle_voice_websocket_connection(ws: WebSocket):
     """Handle a frontend live-call connection; FastAPI invokes this for ``/ws/voice``."""
     settings = get_settings()
+    set_call_id()
 
     # --- pre-accept checks (close with 1008 before accept) ---
     origin = ws.headers.get("origin")
