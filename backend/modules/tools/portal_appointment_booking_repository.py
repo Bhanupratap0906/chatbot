@@ -247,16 +247,12 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             logger.warning("failed: portal auth token is missing")
             return _FALLBACK_MESSAGES["auth"]
 
-        print(f"===== BOOKING START ===== token={token} patient_name={patient_name} mobile={mobile_number} date={appointment_date} time={appointment_time} provider={provider} service={service}")
         settings = get_settings()
         api = self._api()
 
         try:
-            print(f"===== BOOKING: finding patient by mobile ===== mobile={mobile_number} name={patient_name} birth={birth_date}")
             patient = await self._find_patient_by_mobile_number(token, mobile_number, patient_name, birth_date)
-            print(f"===== BOOKING: patient lookup result ===== patient={patient}")
             if isinstance(patient, dict) and patient.get("ambiguous"):
-                print(f"===== BOOKING: ambiguous patient match ===== count={patient.get('count')}")
                 return (
                     "I found more than one patient with that phone number. "
                     "Please confirm the patient's full name and date of birth "
@@ -278,7 +274,6 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                             "mobileNumber": re.sub(r"\D", "", mobile_number or ""),
                         }
                         envelope = await self._api().create_patient(token, payload)
-                        print(f"===== BOOKING: create_patient response ===== response={envelope}")
                         data = envelope.get("data") or {}
                         if isinstance(data, dict) and data.get("patientId"):
                             patient = {
@@ -306,13 +301,11 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             location_id = await resolve_active_location_id(
                 token, client=api, store=self._token_store
             )
-            print(f"===== BOOKING: location resolved ===== location_id={location_id}")
             if not location_id:
                 logger.warning("failed: no clinic location resolved")
                 return _FALLBACK_MESSAGES["location"]
 
             service_id, service_name = await self._resolve_service_id_from_patient_problem(api, service)
-            print(f"===== BOOKING: service resolved ===== service_id={service_id} service_name={service_name}")
             if service_id is None:
                 logger.warning("service mapping failed for patient problem=%r", service)
                 if isinstance(service_name, str) and service_name.startswith("__SERVICES__:"):
@@ -328,11 +321,9 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                 )
 
             master_envelope = await api.get_appointment_master_data(token)
-            print(f"===== BOOKING: master_data response ===== response={master_envelope}")
             master_data = master_envelope.get("data") or {}
 
             provider_id = await self._resolve_provider_id_for_service(api, token, provider, service_id=service_id, service_name=service_name, master_data=master_data)
-            print(f"===== BOOKING: provider resolved ===== provider_id={provider_id} provider={provider}")
             if provider_id is None:
                 logger.warning("failed: no provider is configured/matched")
                 return _FALLBACK_MESSAGES["providers"]
@@ -456,7 +447,6 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             async with lock:
                 pass
 
-            print(f"===== BOOKING: attempting appointment book loop ===== patient_id={patient.get('patientId') if isinstance(patient, dict) else patient} service_id={service_id} provider_id={provider_id} date={appointment_date} candidate_times={candidate_times}")
             last_error: Optional[str] = None
             for attempt_time in candidate_times[:5]:
                 try:
@@ -466,9 +456,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                         settings.portal_appointment_duration_minutes,
                     )
                     payload = self._build_appointment_booking_payload(patient, service_id, provider_id, start, end, operatory_id=operatory_id)
-                    print(f"===== BOOKING: book_appointment payload ===== payload={payload}")
                     envelope = await api.book_appointment(token, payload)
-                    print(f"===== BOOKING: book_appointment response ===== envelope={envelope}")
                     data = envelope.get("data") or {}
                     appointment_id = data.get("id") if isinstance(data, dict) else None
                     logger.info(
@@ -485,17 +473,14 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                         confirmation += f" (appointment id {appointment_id})"
                     return confirmation + "."
                 except PortalAuthError:
-                    print(f"===== BOOKING: PortalAuthError for time={attempt_time}")
                     logger.warning("failed: portal authentication rejected appointment booking")
                     self._token_store.clear()
                     return _FALLBACK_MESSAGES["auth"]
                 except PortalNetworkError:
-                    print(f"===== BOOKING: PortalNetworkError for time={attempt_time}")
                     logger.warning("failed: portal network error during appointment booking")
                     return _FALLBACK_MESSAGES["network"]
                 except PortalApiError as error:
                     detail = error.errors or error.message
-                    print(f"===== BOOKING: PortalApiError for time={attempt_time} detail={detail} error={error}")
                     logger.warning("appointmentBook failed at %s: %r", attempt_time, error)
                     last_error = detail
                     # Conflict: do not silently book another time. Offer open slots.
@@ -524,11 +509,9 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                         "them to pick another time."
                     )
                 except ValueError as error:
-                    print(f"===== BOOKING: ValueError for time={attempt_time} error={error}")
                     logger.warning("invalid time %s: %r", attempt_time, error)
                     continue
                 except Exception as error:
-                    print(f"===== BOOKING: Exception for time={attempt_time} error={error}")
                     logger.warning("booking failed at %s: %r", attempt_time, error, exc_info=True)
                     return "Booking failed due to a technical issue. Apologize briefly and ask the patient to confirm the details so you can try again."
 

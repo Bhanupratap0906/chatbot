@@ -16,6 +16,10 @@ os.environ.setdefault("GROQ_API_KEY", "test-groq-api-key")
 os.environ.setdefault("DEEPGRAM_API_KEY", "test-deepgram-api-key")
 os.environ.setdefault("PORTAL_LOCATION_ENCRYPTION_KEY", "test-portal-location-encryption-key")
 
+# Masking tests must be deterministic: a developer's local LOG_REDACTION=false
+# (debug) must not flip every redact() call during a test run.
+os.environ["LOG_REDACTION"] = "true"
+
 # Make ``import main`` (and ``modules.*``) work regardless of the pytest rootdir.
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:

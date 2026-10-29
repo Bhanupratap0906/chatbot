@@ -4,11 +4,24 @@
 of birth, gender) before they are written to logs. It is intentionally
 lossy: callers keep the original value in memory and only the redacted form
 reaches log lines.
+
+Set ``LOG_REDACTION=false`` in the environment to log original text verbatim
+(temp development/debug use only — transcripts contain patient data).
 """
 
 from __future__ import annotations
 
+import os
+
 from typing import Any
+
+
+def _redaction_enabled() -> bool:
+    """Read ``LOG_REDACTION`` at call time so ``.env`` values (loaded by the
+    settings module, possibly after this module was imported) are honored."""
+    return os.getenv("LOG_REDACTION", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 def redact(value: Any) -> str:
@@ -23,6 +36,9 @@ def redact(value: Any) -> str:
         return ""
     text = str(value).strip()
     if not text:
+        return text
+
+    if not _redaction_enabled():
         return text
 
     digits = "".join(ch for ch in text if ch.isdigit())
@@ -44,4 +60,3 @@ def redact(value: Any) -> str:
 
 
 __all__ = ["redact"]
-

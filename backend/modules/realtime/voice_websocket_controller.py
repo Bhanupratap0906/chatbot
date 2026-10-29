@@ -118,14 +118,23 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
                 logger.warning("session ended: %r", exc)
     finally:
         greeting_task.cancel()
+        stop_background_tasks = getattr(session, "stop_background_tasks", None)
+        if stop_background_tasks is not None:
+            await stop_background_tasks()
         turn = session.turn
         if turn and not turn.done():
             turn.cancel()
+            await asyncio.gather(turn, return_exceptions=True)
         try:
             await dg.send(json.dumps({"type": "CloseStream"}))
         except Exception:
             pass
-        await dg.close()
+        try:
+            await dg.close()
+        except asyncio.CancelledError:
+            pass  # loop already cancelling (e.g. Ctrl+C teardown)
+        except Exception as exc:
+            logger.warning("deepgram close failed: %r", exc)
         try:
             await ws.close()
         except Exception:

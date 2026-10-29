@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 
@@ -74,16 +75,12 @@ class PendingTranscriptBuffer:
 
 def _sanitize_text_for_speech(text: str) -> str:
     """Clean LLM output before TTS: remove format hints, ISO dates, markdown."""
-    import re
-
     if not text:
         return text
     # Normalize special spaces.
     text = text.replace("\u202f", " ").replace("\u00a0", " ")
     # Insert a space after . ? ! when followed by a letter.
-    import re as _re
-
-    text = _re.sub(r"([.?!])([A-Za-z])", r"\1 \2", text)
+    text = re.sub(r"([.?!])([A-Za-z])", r"\1 \2", text)
     # If more than one question, keep only up to the first question sentence.
     if text.count("?") > 1:
         idx = text.find("?")
@@ -429,6 +426,11 @@ class RealtimeVoiceSession:
                 reset_api_audit(self._api_audit_token)
             except Exception:
                 pass
+            try:
+                from modules.workflow.conversation_workflow_graph import ConversationWorkflow
+                ConversationWorkflow.release_thread(self.session_id)
+            except Exception:
+                pass
             logger.info("API CALL SUMMARY (%d calls):", len(self.api_calls))
             for idx, call in enumerate(self.api_calls, 1):
                 logger.info(
@@ -458,6 +460,9 @@ class RealtimeVoiceSession:
             is_final = event.get("is_final", False)
             speech_final = event.get("speech_final", False)
             if transcript:
+                # TEMP DEBUG: print every transcript exactly as the UI sees it.
+                # Retains nothing; remove or mask before production use.
+                print(f"STT [{'final' if is_final else 'interim'}]: {transcript}", flush=True)
                 await self._publisher.send_json(
                     {"type": "transcript", "text": transcript, "final": is_final}
                 )
@@ -558,6 +563,13 @@ class RealtimeVoiceSession:
         if task and not task.done():
             task.cancel()
 
+    async def stop_background_tasks(self) -> None:
+        """Cancel and await session-owned watchdog work before closing the socket."""
+        task = self._no_answer_task
+        self._cancel_prompt_caller_after_silence()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _handle_turn_completion(self, answer: str) -> None:
         self._last_assistant_text = (answer or "").strip()
         self._cancel_prompt_caller_after_silence()
@@ -571,7 +583,7 @@ class RealtimeVoiceSession:
             if self._no_answer_repeats >= 1:
                 return
             self._no_answer_repeats += 1
-            prompt = self._last_assistant_text
+            prompt = "Thanks for waiting." + self._last_assistant_text
             await self._publisher.send_json({"type": "token", "text": prompt})
             voice = self.voice
             async def send_with_log(chunk: bytes):

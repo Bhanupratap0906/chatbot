@@ -153,7 +153,6 @@ class CustomerPortalHttpClient:
 
         headers = {"Authorization": f"Bearer {token}"} if token else None
         url = self._build_portal_url(path)
-        print(f"===== API REQUEST ===== method={method} url={url} token={token} json={json} params={params}")
         log = _ApiCallLog(method, url)
         log.request(json=json, params=params)
 
@@ -173,11 +172,9 @@ class CustomerPortalHttpClient:
                     timeout=self._http.timeout,
                 )
                 body = _try_json(response)
-                print(f"===== API RESPONSE ===== method={method} url={url} status={response.status_code} body={body}")
                 try:
                     self._raise_portal_error_for_envelope(response.status_code, body)
                 except PortalApiError as error:
-                    print(f"===== API ERROR RESPONSE ===== method={method} url={url} status={response.status_code} error={str(error)} body={body}")
                     log.fail(response.status_code, body, str(error))
                     raise
 
@@ -188,14 +185,12 @@ class CustomerPortalHttpClient:
                         status_code=response.status_code,
                     )
 
-                print(f"===== API SUCCESS ===== method={method} url={url} status={response.status_code} body={body}")
                 log.ok(response.status_code, body)
                 self._cb_failures = 0
                 self._cb_open_until = 0.0
                 _append_portal_api_call_to_audit(method, url, response.status_code, json, params, body)
                 return body
             except (httpx.HTTPError, PortalNetworkError) as error:
-                print(f"===== API NETWORK ERROR ===== method={method} url={url} error={error}")
                 last_error = error
                 log.network_error(error) if isinstance(error, httpx.HTTPError) else None
                 if attempt < 2:
@@ -290,11 +285,9 @@ class CustomerPortalHttpClient:
             payload = payload.to_payload()
         else:
             payload = AppointmentBookRequestDTO.from_dict(payload).to_payload()
-        res = await self.request(
+        return await self.request(
             "POST", "/appointments/appointmentBook", token=token, json=payload
         )
-        print('res' , res)
-        return res
 
     async def get_providers(self, token: str) -> dict:
         """All active providers for the authenticated user's location."""

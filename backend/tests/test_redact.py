@@ -28,3 +28,12 @@ def test_single_value_keeps_first_char() -> None:
 
 def test_gender() -> None:
     assert redact("female") == "f***"
+
+
+def test_log_redaction_toggle(monkeypatch) -> None:
+    monkeypatch.setenv("LOG_REDACTION", "false")
+    assert redact("John Doe") == "John Doe"
+    assert redact("9876543210") == "9876543210"
+
+    monkeypatch.setenv("LOG_REDACTION", "true")
+    assert redact("John Doe") == "J*** D***"

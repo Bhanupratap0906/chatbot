@@ -22,9 +22,9 @@ from modules.portal.portal_token_dependency import resolve_portal_token_from_req
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
 
 
-
 # ---------- login rate limiting (5 attempts/min per IP) ----------
-
+# Max 256 IPs retained; entries older than 60 s are purged on access.
+_MAX_TRACKED_IPS = 256
 _LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 _LOGIN_LOCK = asyncio.Lock()
 
@@ -33,6 +33,14 @@ async def _check_login_rate_limit(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     now = time.time()
     async with _LOGIN_LOCK:
+        # Purge IPs whose last attempt is older than 60 s to cap memory use.
+        if len(_LOGIN_ATTEMPTS) >= _MAX_TRACKED_IPS:
+            stale = [
+                k for k, attempts in _LOGIN_ATTEMPTS.items()
+                if not attempts or now - attempts[-1] > 60.0
+            ]
+            for k in stale:
+                _LOGIN_ATTEMPTS.pop(k, None)
         recent = [t for t in _LOGIN_ATTEMPTS.get(ip, []) if now - t < 60.0]
         if len(recent) >= 5:
             raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")

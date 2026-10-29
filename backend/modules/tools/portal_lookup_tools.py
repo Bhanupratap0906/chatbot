@@ -14,6 +14,7 @@ All of them return speakable strings and never raise into the LLM loop.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -27,7 +28,10 @@ from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetwork
 from modules.portal.session import resolve_active_location_id, encrypt_location_id_for_portal
 from modules.tools.portal_appointment_booking_repository import _find_item_by_case_insensitive_name, _map_patient_problem_to_service_keywords, _find_best_item_by_keyword_score, _format_date_for_speech
 from modules.portal.token_store import get_portal_token
+from modules.common.booking_state import get_booking_state
 from modules.tools.tool_registry import TOOL_REGISTRY
+
+logger = logging.getLogger("tool.lookup")
 
 
 def _map_portal_error_to_speakable_message(error: Exception) -> str:
@@ -57,13 +61,10 @@ async def _resolve_active_location_for_session(token: str) -> str:
 @tool
 async def find_patient_by_phone(mobile_number: str) -> str:
     """
-    Check whether a patient exists in the clinic system by phone number.
-
-    Call this BEFORE booking to confirm the patient has a record. The phone
-    number must have 10-15 digits (with an optional leading +).
+    Find an existing patient record by phone number.
 
     Args:
-        mobile_number: The patient's phone number (e.g. "9876543210").
+        mobile_number: Phone number with 10-15 digits (optional leading +).
     """
     digits = re.sub(r"\D", "", mobile_number or "")
     if not 10 <= len(digits) <= 15:
@@ -76,9 +77,8 @@ async def find_patient_by_phone(mobile_number: str) -> str:
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
     try:
-        print(f"===== API LOOKUP: find_patient_by_phone ===== mobile={mobile_number} digits={digits} token={token}")
+        logger.debug("find_patient_by_phone: mobile=%s", digits[-4:])
         envelope = await get_shared_portal_http_client().get_patient_list_data(token, search=digits)
-        print(f"===== API LOOKUP: find_patient_by_phone response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
     data = envelope.get("data") or {}
@@ -93,7 +93,7 @@ async def find_patient_by_phone(mobile_number: str) -> str:
         None,
     )
     if match and match.get("id") is not None:
-        return f"Patient found (patient id {match['id']})."
+        return "Patient record found for that phone number."
     return (
         f"No patient record found for phone number {mobile_number}. Ask the "
         "patient to double-check the number on their account."
@@ -113,9 +113,8 @@ async def list_services() -> str:
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
     try:
-        print(f"===== API LOOKUP: list_services ===== token={token}")
+        logger.debug("list_services: fetching procedure master list")
         envelope = await get_shared_portal_http_client().get_procedure_master_list(token)
-        print(f"===== API LOOKUP: list_services response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
     items = envelope.get("data") or []
@@ -151,9 +150,8 @@ async def list_providers() -> str:
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
     try:
-        print(f"===== API LOOKUP: list_providers ===== token={token}")
+        logger.debug("list_providers: fetching appointment master data")
         envelope = await get_shared_portal_http_client().get_appointment_master_data(token)
-        print(f"===== API LOOKUP: list_providers response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
     data = envelope.get("data") or {}
@@ -171,15 +169,11 @@ async def list_providers() -> str:
 @tool
 async def find_available_slots(appointment_date: str, service: Optional[str] = None) -> str:
     """
-    Find available appointment time slots for a date at this clinic.
-
-    Use this when the patient asks what times are open, before suggesting a
-    specific time to book.
+    Find available appointment time slots for a date.
 
     Args:
         appointment_date: Date to check, as YYYY-MM-DD (e.g. "2026-09-25").
-        service: Optional service name to scope the search (e.g. "Cleaning");
-            defaults to the first configured service.
+        service: Optional service name to scope the search (e.g. "Cleaning").
     """
     token = _get_portal_session_token_or_none()
     if not token:
@@ -206,12 +200,17 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
             startDate=appointment_date,
             endDate=appointment_date,
         )
-        print(f"===== API LOOKUP: find_available_slots ===== date={appointment_date} service={service} service_id={match['procedureId']} payload={payload.to_payload() if hasattr(payload, 'to_payload') else payload}")
+        logger.debug(
+            "find_available_slots: date=%s service=%s service_id=%s",
+            appointment_date, service, match["procedureId"],
+        )
         envelope = await api.get_appointment_slots(payload)
-        print(f"===== API LOOKUP: find_available_slots response ===== response={envelope}")
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
 
+    from modules.common.settings import get_settings
+    settings = get_settings()
+    now_tz = datetime.now(ZoneInfo(settings.clinic_timezone))
     items = envelope.get("data") or []
     times = []
     for item in items:
@@ -225,16 +224,12 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
             speakable = datetime.strptime(open_time, "%H:%M").strftime("%I:%M %p").lstrip("0")
         except ValueError:
             speakable = open_time
-        # Drop slots already past in clinic timezone when checking today
-        from modules.common.settings import get_settings
-        settings = get_settings()
+        # Drop slots already past in clinic timezone when checking today.
         try:
             slot_dt = datetime.strptime(str(item.get("open") or "")[:10], "%Y-%m-%d")
-            if slot_dt.date() == datetime.now(ZoneInfo(settings.clinic_timezone)).date():
-                hm = open_time
-                slot_hour, slot_min = int(hm.split(":")[0]), int(hm.split(":")[1])
-                now_h, now_m = datetime.now(ZoneInfo(settings.clinic_timezone)).hour, datetime.now(ZoneInfo(settings.clinic_timezone)).minute
-                if slot_hour < now_h or (slot_hour == now_h and slot_min < now_m + 15):
+            if slot_dt.date() == now_tz.date():
+                slot_hour, slot_min = int(open_time.split(":")[0]), int(open_time.split(":")[1])
+                if slot_hour < now_tz.hour or (slot_hour == now_tz.hour and slot_min < now_tz.minute + 15):
                     continue  # skip past / too-close slots
         except Exception:
             pass
@@ -243,7 +238,9 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
         if len(times) >= 6:
             break
     if not times:
+        get_booking_state().replace_offered_slots([])
         return f"No open slots found on {_format_date_for_speech(appointment_date)}."
+    get_booking_state().replace_offered_slots(times)
     return f"Open times on {_format_date_for_speech(appointment_date)}: " + ", ".join(times)
 
 
@@ -308,7 +305,6 @@ async def get_appointments(
         # Convert ISO to speakable if possible.
         spoken = start
         try:
-            from datetime import datetime
             dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             spoken = dt.strftime("%B %d, %Y at %I:%M %p").lstrip("0").replace(" 0", " ")
         except ValueError:

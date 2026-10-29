@@ -10,7 +10,7 @@ from modules.common.settings import get_settings
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,9 @@ AGENT_ROLES: dict[str, AgentRole] = {
         description="Appointment availability, booking, and appointment-related requests.",
         system_prompt=r"""You are a voice receptionist for a dental clinic. Replies are spoken aloud.
 
+TOOLS BEFORE COLLECTED FACTS — HIGHEST PRIORITY RULE
+- NEVER call find_available_slots or book_appointment while ANY of the six details is still missing: full name, date of birth, mobile number, gender, reason for the visit, preferred date. If any are unconfirmed, ask for exactly the next missing detail instead of calling a tool. A blocked tool call wastes a turn and makes the caller wait; asking costs nothing.
+
 STYLE
 - 1-2 short sentences per turn. Never use lists, numbering, markdown or formats like "YYYY-MM-DD".
 - Ask ONE question at a time. Say dates naturally ("October 28th").
@@ -56,8 +59,8 @@ BOOKING FLOW
 1. If the caller mentions pain or a problem, ask once: "Is there swelling, fever, or trouble swallowing or breathing?"
    If yes, tell them to seek urgent care or the ER now. If no, continue.
 2. Offer to book the earliest slot. Map the reason to the closest available reason in the clinic data (e.g. toothache -> exam/filling); don't ask the caller to pick.
-3. Collect one at a time: full name -> date of birth -> mobile number (offer the caller ID number first) -> gender -> preferred day/time.
-4. Call the availability tool, offer at most 2 slots, confirm one.
+3. Collect one at a time: full name -> date of birth -> mobile number (offer the caller ID number first) -> gender -> reason for the visit -> preferred date.
+4. Only after all those details are known, call the availability tool, offer at most 2 slots, and let the caller choose one.
 5. Book, then read back: name, provider, date, time. Ask if there's anything else.
 
 RULES
@@ -138,6 +141,25 @@ def route_to_agent(messages: list[BaseMessage], current: str | None = None) -> A
     return AGENT_ROLES["dental_care"]
 
 
+_MAX_CONVERSATION_MESSAGES = 12
+
+
+def _trim_conversation(conversation: list[BaseMessage]) -> list[BaseMessage]:
+    """Cap the history sent to the LLM to protect small per-minute token budgets.
+
+    Never splits a tool-call block: ToolMessages dropped without their
+    AIMessage(tool_calls) would make the request invalid. If the slice starts
+    with orphan ToolMessages, skip forward to the next standalone message.
+    """
+    if len(conversation) <= _MAX_CONVERSATION_MESSAGES:
+        return conversation
+    trimmed = conversation[-_MAX_CONVERSATION_MESSAGES:]
+    start = 0
+    while start < len(trimmed) and isinstance(trimmed[start], ToolMessage):
+        start += 1
+    return trimmed[start:]
+
+
 def messages_for_agent(
     role: AgentRole,
     conversation: list[BaseMessage],
@@ -169,7 +191,7 @@ def messages_for_agent(
                 f"Today is {now:%A, %B %d, %Y} ({now:%Y-%m-%d}). Resolve relative dates from this."
             )
         ),
-        *conversation,
+        *_trim_conversation(conversation),
     ]
     for name, error in (tool_errors or {}).items():
         messages.append(

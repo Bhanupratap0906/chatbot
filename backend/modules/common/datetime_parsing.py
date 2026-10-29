@@ -6,8 +6,6 @@ import re
 from datetime import date, datetime
 
 
-CLINIC_TIMEZONE = "America/New_York"  # placeholder; loaded from settings if needed
-
 def normalize_date_str(date_str: str) -> date | None:
     text = (date_str or "").strip()
     text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text, flags=re.IGNORECASE)

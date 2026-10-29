@@ -7,21 +7,26 @@ those to the LangChain ``@tool`` contract, so:
 * new tools are added by registering them in ``TOOL_REGISTRY`` (OCP),
 * the tool can be tested with a fake repository (DIP/LSP),
 * validation/persistence changes don't touch this adapter's shape (SRP).
+
+Confirmation is NOT taken from the model: the turn manager sets
+``BookingState.readback_done`` / ``user_confirmed`` (see booking_state.py).
 """
 
 from __future__ import annotations
 
 import logging
+import re as _re
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
 
 from modules.common.backend_contracts import AppointmentRepository, AppointmentValidator
+from modules.common.booking_state import get_booking_state, normalize_time
 from modules.common.settings import get_settings
-from modules.tools.tool_registry import TOOL_REGISTRY
 from modules.tools.fallback_appointment_repository import get_default_repository, get_default_validator
+from modules.tools.tool_registry import TOOL_REGISTRY
 
 logger = logging.getLogger("tool")
 
@@ -34,8 +39,8 @@ def _format_missing_booking_fields_message(missing: list[str]) -> str:
     return (
         "Cannot book yet — still missing: "
         + ", ".join(missing)
-        + ". Ask the patient for the missing information first, "
-        "then repeat all details and get confirmation before trying again."
+        + ". Ask the patient for ONE missing item now. Do not read back or "
+        "confirm until nothing is missing."
     )
 
 
@@ -59,48 +64,77 @@ def create_appointment_booking_handler(
         gender: Optional[str] = None,
     ) -> str:
         """Validate booking details then persist them; called by the LangChain booking tool."""
-        missing = val.missing_fields(
-            patient_name, appointment_date, appointment_time, mobile_number
+        # 1. Every required field must be present (DOB and gender included).
+        missing = list(
+            val.missing_fields(patient_name, appointment_date, appointment_time, mobile_number)
         )
+        if not (birth_date or "").strip():
+            missing.append("date of birth")
+        if not (gender or "").strip():
+            missing.append("gender")
         if missing:
             return _format_missing_booking_fields_message(missing)
+
+        # 2. Service/problem is needed to map to a clinic service.
+        if not str(service or "").strip():
+            return (
+                "Booking not submitted: ask what problem or symptom the patient "
+                "needs help with, then match it to a clinic service."
+            )
+
+        # 3. Real confirmation, owned by the turn manager (not by the model).
+        state = get_booking_state()
+        if not state.readback_done:
+            return (
+                "Booking not submitted: read all details back to the caller in one "
+                "sentence and ask 'Is that correct?' first."
+            )
+        if not state.user_confirmed:
+            return "Booking not submitted: wait for the caller to say yes to the read-back."
         if confirmed_by_patient is not True:
             return "Booking not submitted: explicit patient confirmation is required."
-        if not str(service or "").strip():
-            return "Booking not submitted: ask what problem or symptom the patient needs help with, then match it to a clinic service."
 
-        # Validate mobile number.
-        import re as _re
-
+        # 4. Mobile number.
         mobile_digits = _re.sub(r"\D", "", mobile_number or "")
         if not 10 <= len(mobile_digits) <= 15:
             return "I need the caller's real mobile number. Ask for it."
 
-        # Validate birth_date if provided.
-        if birth_date:
-            try:
-                bd = datetime.strptime(birth_date.strip(), "%Y-%m-%d")
-            except ValueError:
-                return "That date of birth doesn't look right. Ask for it as YYYY-MM-DD."
-            if bd.date() > datetime.now(ZoneInfo(get_settings().clinic_timezone)).date():
-                return "Date of birth can't be in the future. Ask again."
-
-        # Validate appointment_date.
-        if appointment_date:
-            parsed_appt = None
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%B %d %Y", "%b %d %Y"):
-                try:
-                    parsed_appt = datetime.strptime(appointment_date.strip(), fmt)
-                    break
-                except ValueError:
-                    continue
-            if parsed_appt is None:
-                return "That appointment date doesn't look right. Ask for it again."
-            if parsed_appt.date() < datetime.now(ZoneInfo(get_settings().clinic_timezone)).date():
-                return "The appointment date must be today or later. Ask for a new date."
-
+        # 5. Birth date.
         try:
-            return await repo.book(
+            bd = datetime.strptime((birth_date or "").strip(), "%Y-%m-%d")
+        except ValueError:
+            return "That date of birth doesn't look right. Ask for it again."
+        clinic_today = datetime.now(ZoneInfo(get_settings().clinic_timezone)).date()
+        if bd.date() > clinic_today:
+            return "Date of birth can't be in the future. Ask again."
+
+        # 6. Appointment date.
+        parsed_appt = None
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%B %d %Y", "%b %d %Y"):
+            try:
+                parsed_appt = datetime.strptime((appointment_date or "").strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_appt is None:
+            return "That appointment date doesn't look right. Ask for it again."
+        if parsed_appt.date() < clinic_today:
+            return "The appointment date must be today or later. Ask for a new date."
+
+        # 7. Appointment time must be one of the slots actually offered.
+        normalized_time = normalize_time(appointment_time)
+        if normalized_time is None:
+            return "That appointment time doesn't look right. Ask the caller to pick one of the offered times."
+        if not state.offered_slots:
+            return "Booking not submitted: check availability and offer appointment times first."
+        if normalized_time not in state.offered_slots:
+            return "That time wasn't offered. Ask the caller to choose one of the available times."
+        if state.selected_slot != normalized_time:
+            return "Booking not submitted: ask the caller to choose one of the offered times before booking."
+
+        # 8. Persist.
+        try:
+            result = await repo.book(
                 patient_name or "",
                 appointment_date or "",
                 appointment_time or "",
@@ -117,6 +151,12 @@ def create_appointment_booking_handler(
                 "Apologize briefly and ask the patient to "
                 "confirm the details so you can try again."
             )
+
+        # Require a fresh read-back + yes for any further booking.
+        state.reset_confirmation()
+        state.offered_slots.clear()
+        state.selected_slot = None
+        return result
 
     return handle
 
@@ -146,22 +186,19 @@ async def book_appointment(
     """
     Book a dental appointment.
 
-    Call this only after the patient has explicitly confirmed: patient name,
-    appointment date, appointment time, and the mobile number on their
-    record. If any of those is still unknown, do NOT call this tool — ask
-    the patient for the missing information first.
+    Call only after the caller said yes to the read-back of all details and
+    every argument is known. Use the exact slot the caller chose.
 
     Args:
         patient_name: Full name of the patient.
-        appointment_date: Requested appointment date (e.g. "2026-09-25").
-        appointment_time: Requested appointment time (e.g. "10:30 AM").
-        mobile_number: Phone number on the patient's record (10-15 digits),
-            used to find the patient in the clinic system.
-        provider: Optional provider preference if explicitly requested;
-            otherwise the clinic's first configured provider is selected.
-        service: The patient's problem or symptom in their own words. The
-            backend maps this description to a configured clinic service.
-        confirmed_by_patient: Must be true only after the patient confirms all booking details.
+        birth_date: Date of birth, YYYY-MM-DD.
+        mobile_number: Phone number as the caller gave it (10-15 digits).
+        gender: Gender as stated by the caller.
+        appointment_date: Requested date, e.g. "2026-10-30".
+        appointment_time: The chosen offered slot, e.g. "10:30 AM".
+        provider: Optional; only for a caller-requested provider preference.
+        service: The patient's problem in their own words (backend maps it).
+        confirmed_by_patient: true only after the caller's clear yes.
     """
 
     # Args are intentionally optional in the schema: small models sometimes

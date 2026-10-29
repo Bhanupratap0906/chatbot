@@ -49,5 +49,3 @@ class TextToSpeechService:
         """Stream one chunk of TTS audio via an async ``send_bytes`` callback."""
         self._validate_text_and_voice_for_synthesis(text, voice)
         await self.speaker.speak(text, voice, send_bytes)
-        if self.cost_tracker is not None:
-            self.cost_tracker.add_tts_text(text, voice)

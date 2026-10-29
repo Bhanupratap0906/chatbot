@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Dict, Any
 
 
-class BookingState(str):
+class BookingState(str, Enum):
     """Booking operation state machine values."""
     IDLE = "idle"
     BOOKING_IN_PROGRESS = "booking_in_progress"
