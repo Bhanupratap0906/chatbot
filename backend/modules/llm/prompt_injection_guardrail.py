@@ -13,7 +13,6 @@ import logging
 import re
 
 from modules.common.backend_contracts import Guardrail
-from modules.common.redact import redact
 
 logger = logging.getLogger("guardrail")
 
@@ -47,6 +46,6 @@ class RegexInjectionGuardrail(Guardrail):
     def is_allowed(self, text: str) -> bool:
         """Allow ordinary input and reject detected injection; called before the LLM request."""
         if self.is_injection(text):
-            logger.warning("prompt injection detected: %r", redact(text))
+            logger.warning("prompt injection detected: %r", text)
             return False
         return True

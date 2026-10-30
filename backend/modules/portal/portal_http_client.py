@@ -30,7 +30,7 @@ from contextvars import ContextVar
 from typing import Any, Optional
 
 import httpx
-from cachetools import TTLCache
+
 from modules.common.settings import get_settings
 from modules.portal.dtos import (
     AppointmentBookRequestDTO,
@@ -97,27 +97,24 @@ class CustomerPortalHttpClient:
 
     def __init__(
         self,
-        base_url: Optional[str] = None,
+        base_build_portal_url: Optional[str] = None,
         timeout: Optional[float] = None,
         http: Optional[httpx.AsyncClient] = None,
     ) -> None:
         """Build the client from ``Settings`` unless explicit values are given."""
         settings = get_settings()
-        self._base_url = (base_url or settings.portal_base_url).rstrip("/")
+        self._base_build_portal_url = (base_build_portal_url or settings.portal_base_build_portal_url).rstrip("/")
         self._http = http or httpx.AsyncClient(
             timeout=timeout or settings.portal_timeout
         )
-        self._cache: TTLCache[str, dict] = TTLCache(maxsize=256, ttl=300.0)
-        self._cb_failures = 0
-        self._cb_open_until = 0.0
-        self._cb_threshold = 5
-        self._cb_cooldown = 30.0
+        self._cache: dict[str, tuple[float, dict]] = {}
+        self._cache_ttl = 300.0
 
     # ---------- transport ----------
 
     def _build_portal_url(self, path: str) -> str:
         """Join a portal path (``/appointments/...``) onto the base URL."""
-        return f"{self._base_url}/{path.lstrip('/')}"
+        return f"{self._base_build_portal_url}/{path.lstrip('/')}"
 
     @staticmethod
     def _raise_portal_error_for_envelope(status_code: int, body: Any) -> None:
@@ -148,65 +145,38 @@ class CustomerPortalHttpClient:
         params: Optional[dict] = None,
     ) -> dict:
         """Perform one portal call; return the envelope or raise a typed error."""
-        import time as _time
-        import asyncio as _asyncio
-
         headers = {"Authorization": f"Bearer {token}"} if token else None
-        url = self._build_portal_url(path)
-        log = _ApiCallLog(method, url)
+        log = _ApiCallLog(method, self._build_portal_url(path))
         log.request(json=json, params=params)
+        try:
+            response = await self._http.request(
+                method,
+                self._build_portal_url(path),
+                json=json,
+                params=params,
+                headers=headers,
+            )
+        except httpx.HTTPError as error:
+            log.network_error(error)
+            raise PortalNetworkError(f"Cannot reach portal: {error}") from error
 
-        # Circuit breaker: fail fast while the portal is known to be down.
-        if self._cb_open_until and _time.time() < self._cb_open_until:
-            raise PortalNetworkError("Portal circuit breaker open; retry later.")
+        body = _try_json(response)
+        try:
+            self._raise_portal_error_for_envelope(response.status_code, body)
+        except PortalApiError as error:
+            log.fail(response.status_code, body, str(error))
+            raise
 
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = await self._http.request(
-                    method,
-                    url,
-                    json=json,
-                    params=params,
-                    headers=headers,
-                    timeout=self._http.timeout,
-                )
-                body = _try_json(response)
-                try:
-                    self._raise_portal_error_for_envelope(response.status_code, body)
-                except PortalApiError as error:
-                    log.fail(response.status_code, body, str(error))
-                    raise
+        if not isinstance(body, dict):
+            log.fail(response.status_code, body, "non-JSON response")
+            raise PortalApiError(
+                "Portal returned a non-JSON response",
+                status_code=response.status_code,
+            )
 
-                if not isinstance(body, dict):
-                    log.fail(response.status_code, body, "non-JSON response")
-                    raise PortalApiError(
-                        "Portal returned a non-JSON response",
-                        status_code=response.status_code,
-                    )
-
-                log.ok(response.status_code, body)
-                self._cb_failures = 0
-                self._cb_open_until = 0.0
-                _append_portal_api_call_to_audit(method, url, response.status_code, json, params, body)
-                return body
-            except (httpx.HTTPError, PortalNetworkError) as error:
-                last_error = error
-                log.network_error(error) if isinstance(error, httpx.HTTPError) else None
-                if attempt < 2:
-                    await _asyncio.sleep(0.2 * (2 ** attempt))
-                    continue
-                break
-            except PortalApiError:
-                raise
-
-        # All retries exhausted.
-        self._cb_failures += 1
-        if self._cb_failures >= self._cb_threshold:
-            self._cb_open_until = _time.time() + self._cb_cooldown
-        if isinstance(last_error, httpx.HTTPError):
-            raise PortalNetworkError(f"Cannot reach portal: {last_error}") from last_error
-        raise last_error if last_error is not None else PortalNetworkError("Portal request failed")
+        log.ok(response.status_code, body)
+        _append_portal_api_call_to_audit(self._method if False else method, self._build_portal_url(path), response.status_code, json, params, body)
+        return body
 
     async def aclose(self) -> None:
         """Close the underlying connection pool."""
@@ -295,17 +265,14 @@ class CustomerPortalHttpClient:
 
     async def get_appointment_master_data(self, token: str) -> dict:
         """Aggregated reasons/providers/operatories for appointment booking."""
-        import hashlib
+        import time as _time
 
-        from modules.portal.session import extract_location_id_from_jwt
-        from modules.common.settings import get_settings
-
-        location_id = extract_location_id_from_jwt(token) or get_settings().portal_location_id or ""
-        key = f"master:{location_id}:{hashlib.sha256(token.encode()).hexdigest()}"
-        if key in self._cache:
-            return self._cache[key]
+        key = f"master:{token[:12]}"
+        cached = self._cache.get(key)
+        if cached and (_time.time() - cached[0]) < self._cache_ttl:
+            return cached[1]
         result = await self.request("GET", "/appointments/getAppointmentMasterData", token=token)
-        self._cache[key] = result
+        self._cache[key] = (_time.time(), result)
         return result
 
     async def get_procedure_master_list(
@@ -320,18 +287,12 @@ class CustomerPortalHttpClient:
         search: str | None = None,
     ) -> dict:
         """Paginated procedure (service) master list with providers/operatories."""
-        import hashlib
+        import time as _time
 
-        from modules.portal.session import extract_location_id_from_jwt
-        from modules.common.settings import get_settings
-
-        location_id = extract_location_id_from_jwt(token) or get_settings().portal_location_id or ""
-        key = (
-            f"proc:{location_id}:{hashlib.sha256(token.encode()).hexdigest()}:"
-            f"{page}:{per_page}:{sort_key}:{sort_value}:{is_active}:{search}"
-        )
-        if key in self._cache:
-            return self._cache[key]
+        key = f"proc:{token[:12]}:{page}:{per_page}:{sort_key}:{sort_value}:{is_active}:{search}"
+        cached = self._cache.get(key)
+        if cached and (_time.time() - cached[0]) < self._cache_ttl:
+            return cached[1]
         params: dict[str, Any] = {
             "page": page,
             "perPage": per_page,
@@ -345,7 +306,7 @@ class CustomerPortalHttpClient:
         result = await self.request(
             "GET", "/appointments/getProcedureMasterList", token=token, params=params
         )
-        self._cache[key] = result
+        self._cache[key] = (_time.time(), result)
         return result
 
     async def get_patient_list_data(
@@ -364,6 +325,10 @@ class CustomerPortalHttpClient:
         if alphabet:
             params["alphabet"] = alphabet
         return await self.request("GET", "/patient/list-data", token=token, params=params)
+
+    async def list_appointments(self, token: str, payload: dict) -> dict:
+        """List appointments (POST /appointments/listAllApppointments)."""
+        return await self.request("POST", "/appointments/listAllApppointments", token=token, json=payload)
 
     async def create_patient(self, token: str, payload: dict) -> dict:
         """Create a patient record (POST /patient)."""

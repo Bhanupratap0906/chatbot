@@ -8,6 +8,9 @@ import { PCM_WORKLET_SOURCE } from "@/lib/pcmWorkletSource";
    CONFIGURATION
 ========================================================= */
 
+const SIP_WS =
+  process.env.NEXT_PUBLIC_SIP_WS ?? "wss://sip.begindaily.in:7443/";
+
 // Sample rate of the PCM sent to the backend. Must match INPUT_SAMPLE_RATE
 // in modules/realtime, because Deepgram's /v1/listen connection there is
 // opened with sample_rate=16000.
@@ -15,14 +18,17 @@ const INPUT_SAMPLE_RATE = 16000;
 
 // Logs the peak level of the caller audio every second, plus a warning if
 // it stays at pure silence.
-const DEBUG_INPUT_LEVEL = false;
+const DEBUG_INPUT_LEVEL = true;
 
 // How long to wait after answering before warning that no caller audio
 // has arrived.
 const NO_MEDIA_WARN_MS = 8000;
 
+const SIP_DOMAIN    = process.env.NEXT_PUBLIC_SIPDOMAIN;
+const SIP_USERNAME  = process.env.NEXT_PUBLIC_SIPUSERNAME;
+const SIP_PASSWORD  = process.env.NEXT_PUBLIC_SIPPASSWORD;
 // Logs inbound RTP byte counts 3s and 8s after answering.
-const DEBUG_MEDIA_STATS = false;
+const DEBUG_MEDIA_STATS = true;
 
 function resolveVoiceWsUrl(): string {
   /** Resolve the backend realtime endpoint; called when opening the AI socket. */
@@ -46,10 +52,9 @@ type Status = {
 export function VoiceAgent() {
   /** Manage SIP registration, the live-call WebSocket, audio routing, and call UI state. */
   /* ---------------- UI state ---------------- */
-  const [sipWs, setSipWs] = useState("");
-  const [sipDomain,   setSipDomain]   = useState("");
-  const [sipUsername, setSipUsername] = useState("");
-  const [sipPassword, setSipPassword] = useState("");
+  const [sipDomain,   setSipDomain]   = useState(SIP_DOMAIN ?? "");
+  const [sipUsername, setSipUsername] = useState(SIP_USERNAME ?? "");
+  const [sipPassword, setSipPassword] = useState(SIP_PASSWORD ?? "");
   const [isRegistered, setIsRegistered] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
@@ -94,11 +99,9 @@ export function VoiceAgent() {
   const answerTextRef = useRef("");
   const testModeActiveRef = useRef(false);
   const testMicStreamRef = useRef<MediaStream | null>(null);
-  const hangUpSIPRef = useRef<(() => Promise<void>) | null>(null);
 
   // Credentials captured at Start SIP click time (avoids stale closures).
   const credsRef = useRef({ domain: "", username: "", password: "" });
-  const sipWsRef = useRef("");
 
   const setStatus = useCallback(
     (text: string, type: StatusType = "", live = false) => {
@@ -235,20 +238,8 @@ export function VoiceAgent() {
       } else if (msg.type === "answer_end") {
         setStatus("AI speaking / listening", "success", true);
       } else if (msg.type === "hangup") {
-        setStatus("Call ended — please call the clinic or emergency services if needed", "success");
-        // Wait for queued TTS to finish before hanging up (max 15s cap)
-        const maxWait = 15000;
-        const start = Date.now();
-        const waitForAudio = () => {
-          const now = Date.now();
-          const remainingMs = Math.max(0, (aiOutputNextTimeRef.current * 1000) - (aiAudioContextRef.current?.currentTime || 0) * 1000);
-          if (remainingMs > 0 && (now - start) < maxWait) {
-            setTimeout(waitForAudio, 200);
-          } else {
-            hangUpSIPRef.current?.();
-          }
-        };
-        waitForAudio();
+        setStatus("Connecting you to the clinic team — call ended", "success");
+        void hangUpSIP();
       } else if (msg.type === "interrupt") {
         stopTTSPlayback();
       } else if (msg.type === "error") {
@@ -890,7 +881,7 @@ export function VoiceAgent() {
       const userAgent = new UserAgent({
         uri,
         transportOptions: {
-          server: sipWsRef.current,
+          server: SIP_WS,
           traceSip: true,
         },
         authorizationUsername: username,
@@ -1001,7 +992,6 @@ export function VoiceAgent() {
     }
     cleanupCall();
   }, [cleanupCall]);
-  hangUpSIPRef.current = hangUpSIP;
 
   /* =========================================================
      DISCONNECT SIP (hang up, unregister, stop agent)
@@ -1106,30 +1096,6 @@ export function VoiceAgent() {
   useEffect(() => {
     if (!isRegistered) setIsStarting(false);
   }, [isRegistered]);
-
-  // Fetch SIP credentials from the backend (server-side env) for a signed-in session.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/sip/credentials", { credentials: "include" });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled) return;
-        const ws = data?.wsUrl ?? "";
-        setSipWs(ws);
-        sipWsRef.current = ws;
-        setSipDomain(data?.domain ?? "");
-        setSipUsername(data?.username ?? "");
-        setSipPassword(data?.password ?? "");
-      } catch {
-        // ignore; SIP registration will be unavailable
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   /* =========================================================
      PAGE CLEANUP (replaces window beforeunload)

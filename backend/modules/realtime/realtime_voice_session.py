@@ -19,16 +19,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
-import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from modules.common.conversation_cost_tracker import ConversationCostTracker
 from modules.common.backend_contracts import ChunkSplitter, ConversationHistory, LlmAssistant, MessagePublisher
 from modules.common.settings import Settings, get_settings
-from modules.common.redact import redact
 from modules.llm.sentence_chunk_splitter import SentenceChunkSplitter
 from modules.realtime.greeting_service import GreetingService
 from modules.realtime.conversation_history import InMemoryConversationHistory
@@ -74,12 +71,16 @@ class PendingTranscriptBuffer:
 
 def _sanitize_text_for_speech(text: str) -> str:
     """Clean LLM output before TTS: remove format hints, ISO dates, markdown."""
+    import re
+
     if not text:
         return text
     # Normalize special spaces.
     text = text.replace("\u202f", " ").replace("\u00a0", " ")
     # Insert a space after . ? ! when followed by a letter.
-    text = re.sub(r"([.?!])([A-Za-z])", r"\1 \2", text)
+    import re as _re
+
+    text = _re.sub(r"([.?!])([A-Za-z])", r"\1 \2", text)
     # If more than one question, keep only up to the first question sentence.
     if text.count("?") > 1:
         idx = text.find("?")
@@ -182,7 +183,7 @@ class AssistantTurnManager:
             nonlocal first_logged
             if not first_logged:
                 first_logged = True
-                logger.info("tts first audio at %s for %r", elapsed(), redact(text))
+                logger.info("tts first audio at %s for %r", elapsed(), text)
             await publisher.send_bytes(chunk)
 
         await self._tts.speak(text, voice, send_with_log)
@@ -196,7 +197,7 @@ class AssistantTurnManager:
             return f"{time.perf_counter() - started:.2f}s"
 
         try:
-            logger.info("turn start: %r", redact(text))
+            logger.info("turn start: %r", text)
             self._current_text = text
             await self._publisher.send_json({"type": "user", "text": text})
             await self._publisher.send_json({"type": "answer_start"})
@@ -206,7 +207,7 @@ class AssistantTurnManager:
             first_token = True
             self._rate_limited = False
             workflow = getattr(self._llm, "workflow", None)
-            stream = workflow.stream_conversation_turn(text, self._history.snapshot()) if workflow else self._llm.stream_conversation_turn(text, self._history.snapshot())
+            stream = workflow.stream_conversation_turn(text, self._history.snapshot()) if workflow else self._llm.stream(text, self._history.snapshot())
             hangup = False
 
             while True:
@@ -277,7 +278,7 @@ class AssistantTurnManager:
                 self._history.add_turn(text, answer)
             self._rate_limited = False
             self._current_text = ""
-            logger.info("turn done at %s: %r", elapsed(), redact(answer))
+            logger.info("turn done at %s: %r", elapsed(), answer)
             if self._on_complete is not None:
                 try:
                     await self._on_complete(answer)
@@ -316,8 +317,6 @@ class RealtimeVoiceSession:
         history: ConversationHistory | None = None,
         splitter: ChunkSplitter | None = None,
         settings: Settings | None = None,
-        portal_token: str | None = None,
-        portal_location_id: str | None = None,
     ):
         """Wire websocket, STT, LLM, TTS, history, and turn services for one live call; built by the voice websocket route."""
         self.ws = ws
@@ -328,12 +327,7 @@ class RealtimeVoiceSession:
         self.api_calls: list[dict] = []
         from modules.portal.portal_http_client import set_api_audit
         self._api_audit_token = set_api_audit(self.api_calls)
-        self.session_id = str(uuid.uuid4())
-        self.portal_token = portal_token
-        self.portal_location_id = portal_location_id
-        from modules.portal.token_store import set_portal_token
-        if portal_token:
-            set_portal_token(portal_token, location_id=portal_location_id)
+        self.session_id = str(id(self))
         # DIP: concrete defaults keep old ``RealtimeVoiceSession(ws, dg)`` working,
         # but tests/callers may inject fakes (LSP).
         if llm is None:
@@ -367,7 +361,6 @@ class RealtimeVoiceSession:
             dg=self.dg,
         )
         self._no_answer_task: asyncio.Task | None = None
-        self._greeting_task: asyncio.Task | None = None
         self._last_assistant_text: str = ""
         self._no_answer_repeats: int = 0
         self._greeting = GreetingService(
@@ -417,17 +410,11 @@ class RealtimeVoiceSession:
                         self.voice = voice
                         self._greeting._voice = voice
                 elif payload.get("type") == "interrupt":
-                    await self.cancel_configured_greeting()
                     await self.cancel_active_assistant_turn()
         finally:
             try:
                 from modules.portal.portal_http_client import reset_api_audit
                 reset_api_audit(self._api_audit_token)
-            except Exception:
-                pass
-            try:
-                from modules.workflow.conversation_workflow_graph import ConversationWorkflow
-                ConversationWorkflow.release_thread(self.session_id)
             except Exception:
                 pass
             logger.info("API CALL SUMMARY (%d calls):", len(self.api_calls))
@@ -438,88 +425,41 @@ class RealtimeVoiceSession:
                     call.get("method"),
                     call.get("url"),
                     call.get("status"),
-                    redact(call.get("request")),
-                    redact(call.get("response")),
+                    call.get("request"),
+                    call.get("response"),
                 )
 
     # ---------- Deepgram -> pipeline ----------
 
-    async def _process_deepgram_event(self, raw: str) -> None:
-        """Handle one Deepgram event (extracted for reconnect support)."""
-        event = json.loads(raw)
-        kind = event.get("type")
-        if kind == "SpeechStarted":
-            # The greeting runs independently from assistant turns. Stop it as
-            # soon as the caller speaks so greeting audio cannot overlap the
-            # caller or the first generated response.
-            await self.cancel_configured_greeting()
-            if self._settings.barge_in:
-                logger.info("stt speech started -> cancelling turn")
-                self._cancel_prompt_caller_after_silence()
-                await self.cancel_active_assistant_turn()
-        elif kind == "Results":
-            alt = event["channel"]["alternatives"][0]
-            transcript = alt.get("transcript", "").strip()
-            is_final = event.get("is_final", False)
-            speech_final = event.get("speech_final", False)
-            if transcript:
-                self._cancel_prompt_caller_after_silence()   # caller is speaking, stop "Are you still there?"
-                await self.cancel_configured_greeting()      # caller spoke over greeting
-                print(f"STT [{'final' if is_final else 'interim'}]: {transcript}", flush=True)
-                await self._publisher.send_json(
-                    {"type": "transcript", "text": transcript, "final": is_final}
-                )
-            if is_final and transcript:
-                self._buffer.add_final_transcript(transcript)
-            if speech_final:
-                logger.info("stt speech_final")
-                await self.start_assistant_turn_from_buffer()
-        elif kind == "UtteranceEnd":
-            logger.info("stt utterance end")
-            await self.start_assistant_turn_from_buffer()
-        elif kind == "Error" or event.get("error"):
-            logger.warning("stt error: %s", raw)
-
-    async def _speak_fallback_and_escalate(self) -> None:
-        """Speak the unrecoverable-STT fallback and escalate the call."""
-        fallback = "I'm having trouble, let me connect you to the front desk."
-        try:
-            await self._publisher.send_json({"type": "transcript", "text": fallback, "final": True})
-        except Exception:
-            pass
-        try:
-            await self.tts.speak(fallback, self.voice, self._publisher.send_bytes)
-        except Exception as error:
-            logger.warning("fallback tts failed: %r", error)
-        self.turns._hangup = True
-        self.hangup_requested = True
-
     async def pump_deepgram_events_to_turns(self):
         """Translate Deepgram events into frontend transcripts and assistant turns; run as a session task."""
-        attempts = 0
-        while True:
-            try:
-                async for raw in self.dg:
-                    await self._process_deepgram_event(raw)
-                break
-            except Exception as error:
-                logger.warning("deepgram socket dropped: %r", error)
-                if attempts >= 1:
-                    await self._speak_fallback_and_escalate()
-                    break
-                attempts += 1
-                try:
-                    from modules.stt.deepgram_realtime_connector import DeepgramRealtimeConnector
-
-                    connector = DeepgramRealtimeConnector(
-                        api_key=self._settings.deepgram_api_key,
-                        input_sample_rate=self._settings.input_sample_rate,
+        async for raw in self.dg:
+            event = json.loads(raw)
+            kind = event.get("type")
+            if kind == "SpeechStarted":
+                if self._settings.barge_in:
+                    logger.info("stt speech started -> cancelling turn")
+                    self._cancel_prompt_caller_after_silence()
+                    await self.cancel_active_assistant_turn()
+            elif kind == "Results":
+                alt = event["channel"]["alternatives"][0]
+                transcript = alt.get("transcript", "").strip()
+                is_final = event.get("is_final", False)
+                speech_final = event.get("speech_final", False)
+                if transcript:
+                    await self._publisher.send_json(
+                        {"type": "transcript", "text": transcript, "final": is_final}
                     )
-                    self.dg = await connector.connect_to_deepgram_realtime()
-                except Exception as reconnect_error:
-                    logger.error("deepgram reconnect failed: %r", reconnect_error)
-                    await self._speak_fallback_and_escalate()
-                    break
+                if is_final and transcript:
+                    self._buffer.add_final_transcript(transcript)
+                if speech_final:
+                    logger.info("stt speech_final")
+                    await self.start_assistant_turn_from_buffer()
+            elif kind == "UtteranceEnd":
+                logger.info("stt utterance end")
+                await self.start_assistant_turn_from_buffer()
+            elif kind == "Error" or event.get("error"):
+                logger.warning("stt error: %s", raw)
 
     async def keep_deepgram_connection_alive(self):
         """Periodically keep Deepgram's realtime socket alive; run alongside the two websocket pumps."""
@@ -534,33 +474,14 @@ class RealtimeVoiceSession:
     async def start_assistant_turn_from_buffer(self):
         """Consume buffered speech and schedule its assistant response; called on final utterance events."""
         self._cancel_prompt_caller_after_silence()
-        await self.cancel_configured_greeting()
         text = self._buffer.take_pending_transcript()
         if not text:
             return
-        # Ignore only passive backchannels while the agent is speaking. A short
-        # but meaningful reply ("no", a name, a date, etc.) must start a turn.
-        # A clear affirmative after the workflow's booking read-back must also
-        # reach ConversationWorkflow so its caller-owned BookingState records
-        # the confirmation; there is deliberately no second coordinator state.
+        # Ignore backchannels/short utterances while the agent is speaking.
         words = text.lower().split()
         if self.turns.task is not None and not self.turns.task.done():
-            normalized_words = [word.strip(".,!?") for word in words]
-            is_backchannel = bool(normalized_words) and all(
-                word in self._BACKCHANNELS for word in normalized_words
-            )
-            booking_state = getattr(self.workflow, "booking_state", None)
-            confirmation_pending = bool(
-                booking_state is not None
-                and booking_state.readback_done
-                and not booking_state.user_confirmed
-            )
-            affirmative = any(
-                word in {"yes", "yeah", "yep", "correct", "right", "sure", "confirm"}
-                for word in normalized_words
-            )
-            if is_backchannel and not (confirmation_pending and affirmative):
-                logger.info("ignoring passive backchannel while speaking: %r", redact(text))
+            if len(words) <= 2 or all(w.strip(".,!?") in self._BACKCHANNELS for w in words):
+                logger.info("ignoring backchannel/short utterance while speaking: %r", text)
                 return
         await self.turns.start_assistant_turn(text)
 
@@ -573,14 +494,6 @@ class RealtimeVoiceSession:
         self._no_answer_task = None
         if task and not task.done():
             task.cancel()
-
-    async def stop_background_tasks(self) -> None:
-        """Cancel and await session-owned watchdog work before closing the socket."""
-        task = self._no_answer_task
-        self._cancel_prompt_caller_after_silence()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        await self.cancel_configured_greeting(notify_client=False)
 
     async def _handle_turn_completion(self, answer: str) -> None:
         self._last_assistant_text = (answer or "").strip()
@@ -595,10 +508,7 @@ class RealtimeVoiceSession:
             if self._no_answer_repeats >= 1:
                 return
             self._no_answer_repeats += 1
-            reminder = self._last_assistant_text[:40].strip()
-            prompt = (
-                "Are you still there?" + (f" {reminder}" if reminder else "")
-            )[:100]
+            prompt = "Are you still there? " + self._last_assistant_text
             await self._publisher.send_json({"type": "token", "text": prompt})
             voice = self.voice
             async def send_with_log(chunk: bytes):
@@ -614,24 +524,6 @@ class RealtimeVoiceSession:
         # Rebuild with current voice (voice may change via config).
         self._greeting._voice = self.voice
         await self._greeting.send()
-
-    def start_configured_greeting(self) -> asyncio.Task:
-        """Start and retain the greeting task so caller speech can interrupt it."""
-        if self._greeting_task is None or self._greeting_task.done():
-            self._greeting_task = asyncio.create_task(self.send_configured_greeting())
-        return self._greeting_task
-
-    async def cancel_configured_greeting(self, *, notify_client: bool = True) -> bool:
-        """Cancel an active greeting and clear already queued browser audio."""
-        task = self._greeting_task
-        self._greeting_task = None
-        if task is None or task.done():
-            return False
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        if notify_client:
-            await self._publisher.send_json({"type": "interrupt"})
-        return True
 
 class _SpeakerAdapter:
     """Adapts TTS for GreetingService (DIP). Respects the voice passed in."""
@@ -655,7 +547,7 @@ class _SpeakerAdapter:
             nonlocal first_logged
             if not first_logged:
                 first_logged = True
-                logger.info("tts first audio at %s for %r", elapsed(), redact(text))
+                logger.info("tts first audio at %s for %r", elapsed(), text)
             await self._session._publisher.send_bytes(chunk)
 
         await self._session.tts.speak(text, voice, send_with_log)

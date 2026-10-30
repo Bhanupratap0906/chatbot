@@ -16,14 +16,10 @@ exceptions escape to the LLM loop.
 
 from __future__ import annotations
 
-import asyncio
-import base64
-import json
 import logging
 import re
 from datetime import datetime, timedelta
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 from modules.common.backend_contracts import AppointmentRepository as IAppointmentRepository
 from modules.common.settings import get_settings
@@ -37,62 +33,8 @@ from modules.portal.dtos import (
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
 from modules.portal.session import resolve_active_location_id, encrypt_location_id_for_portal
 from modules.portal.token_store import PortalTokenStore, portal_token_store
-from modules.common.redact import redact
 
 logger = logging.getLogger("booking")
-
-# JWT claim names that may carry the clinic's IANA timezone (e.g. "Asia/Kolkata").
-_TIMEZONE_CLAIM_KEYS = ("timezone", "timeZone", "tz", "locationTimezone", "locationTimeZone")
-
-
-def _timezone_name_from_token(token: Optional[str]) -> Optional[str]:
-    """Read a timezone claim from the portal JWT payload (read-only, no signature check)."""
-    if not token or token.count(".") != 2:
-        return None
-    try:
-        payload_b64 = token.split(".")[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception:
-        return None
-    if not isinstance(claims, dict):
-        return None
-    for key in _TIMEZONE_CLAIM_KEYS:
-        value = claims.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def get_clinic_zone(token: Optional[str] = None) -> ZoneInfo:
-    """Clinic timezone: the token's timezone claim if present and valid, else settings."""
-    for name in (_timezone_name_from_token(token), get_settings().clinic_timezone):
-        if not name:
-            continue
-        try:
-            return ZoneInfo(name)
-        except Exception:
-            logger.warning("invalid timezone name %r", name)
-    return ZoneInfo("UTC")
-
-
-def to_clinic_datetime(value: str, zone: ZoneInfo) -> Optional[datetime]:
-    """Parse a portal ISO timestamp and express it in the clinic timezone.
-
-    The portal returns appointment times in UTC (e.g. ``...T08:55:00+00:00``).
-    Timestamps with an offset are converted; timestamps without one are
-    already clinic-local and are returned as-is.
-    """
-    text = (value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=zone)
-    return parsed.astimezone(zone)
 
 # Tolerated input formats for the conversational date/time arguments.
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%B %d %Y", "%b %d %Y", "%B %d, %Y", "%b %d, %Y")
@@ -213,13 +155,14 @@ def _find_item_by_case_insensitive_name(items: list[dict], wanted: Optional[str]
 # the service with the most keyword hits instead of the first hit.
 _PROBLEM_TERMS: dict[str, tuple[str, ...]] = {
     "clean": ("clean", "hygiene", "prophy"),
-    "toothache": ("toothache", "pain", "emergency", "exam", "filling", "restor"),
+    "toothache": ("toothache", "pain", "emergency", "exam"),
     "pain": ("pain", "emergency", "exam"),
     "hurt": ("pain", "emergency", "exam"),
     "cavity": ("cavity", "filling", "restor", "exam"),
     "molar": ("pain", "emergency", "exam", "filling", "restor"),
     "tooth": ("pain", "emergency", "exam", "filling", "restor"),
     "teeth": ("pain", "emergency", "exam", "filling", "restor"),
+    "toothache": ("toothache", "pain", "emergency", "exam", "filling", "restor"),
     "cavity's": ("cavity", "filling", "restor", "exam"),
     "broken": ("broken", "fracture", "emergency", "restor", "exam"),
     "chipped": ("chip", "emergency", "restor", "exam"),
@@ -297,12 +240,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
         birth_date: Optional[str] = None,
         gender: Optional[str] = None,
     ) -> str:
-        """Book one appointment; always returns a patient-facing result string.
-
-        ``appointment_date`` is used exactly as passed in. When
-        ``find_available_slots`` moved the caller to the next available day,
-        the assistant must pass that new date here.
-        """
+        """Book one appointment; always returns a patient-facing result string."""
         token = self._token_store.get()
         if not token:
             logger.warning("failed: portal auth token is missing")
@@ -313,21 +251,12 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
 
         try:
             patient = await self._find_patient_by_mobile_number(token, mobile_number, patient_name, birth_date)
-            logger.debug("patient lookup done: found=%s", bool(patient))
-            if isinstance(patient, dict) and patient.get("ambiguous"):
-                return (
-                    "I found more than one patient with that phone number. "
-                    "Please confirm the patient's full name and date of birth "
-                    "so I can pick the right record."
-                )
             if patient is None:
                 if birth_date and gender:
                     try:
                         name_parts = (patient_name or "").strip().split()
                         first = name_parts[0] if name_parts else patient_name or "Patient"
-                        if len(name_parts) < 2:
-                            return "I need the patient's full first and last name to create a record."
-                        last = " ".join(name_parts[1:])
+                        last = " ".join(name_parts[1:]) if len(name_parts) > 1 else "Patient"
                         payload = {
                             "firstName": first,
                             "lastName": last,
@@ -352,7 +281,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                 if patient is None:
                     logger.warning("failed: patient record was not found")
                     return (
-                        f"No patient record found for phone number {redact(mobile_number)}. "
+                        f"No patient record found for phone number {mobile_number}. "
                         "To book, I'll need the patient's date of birth (YYYY-MM-DD) "
                         "and gender (male/female/other) to create a record, or "
                         "they can register at the front desk."
@@ -484,31 +413,6 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                     "Apologize and ask the patient to choose another date."
                 )
 
-            if not _is_exact_time(appointment_time) and candidate_times:
-                speakable = []
-                for t in candidate_times[:2]:
-                    try:
-                        speakable.append(datetime.strptime(t, "%H:%M").strftime("%I:%M %p").lstrip("0"))
-                    except ValueError:
-                        speakable.append(t)
-                return (
-                    "Available times on " + _format_date_for_speech(appointment_date) + ": "
-                    + ", ".join(speakable)
-                    + ". Ask the patient which they prefer."
-                )
-
-            # Idempotency: don't double-book on a retry after a timeout.
-            if patient and isinstance(patient, dict) and patient.get("patientId") and candidate_times:
-                if await self._has_existing_appointment(token, api, patient, appointment_date, candidate_times[0], service_id):
-                    return (
-                        f"An appointment for {patient_name} on {_format_date_for_speech(appointment_date)} "
-                        f"at {_format_time_for_speech(candidate_times[0])} is already booked."
-                    )
-
-            lock = await self._session_booking_lock(token)
-            async with lock:
-                pass
-
             last_error: Optional[str] = None
             for attempt_time in candidate_times[:5]:
                 try:
@@ -570,12 +474,12 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
                         "tell the patient the slot may no longer be available, and ask "
                         "them to pick another time."
                     )
-                except ValueError as error:
-                    logger.warning("invalid time %s: %r", attempt_time, error)
-                    continue
                 except Exception as error:
                     logger.warning("booking failed at %s: %r", attempt_time, error, exc_info=True)
                     return "Booking failed due to a technical issue. Apologize briefly and ask the patient to confirm the details so you can try again."
+                except ValueError as error:
+                    logger.warning("invalid time %s: %r", attempt_time, error)
+                    continue
 
             return (
                 f"The appointment could not be booked ({last_error}). All attempted "
@@ -623,27 +527,36 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
         if not matches:
             return None
 
-        # Require a full-name match AND a date-of-birth match. No subset
-        # matching: "John" must not match "John Smith" sharing a phone.
-        name_needle = (patient_name or "").strip().lower()
-        filtered = list(matches)
-        if name_needle:
-            exact = [
-                m for m in filtered
-                if str(m.get("displayName") or m.get("patientName") or "").strip().lower() == name_needle
-            ]
-            filtered = exact
-        if birth_date:
-            dob_filtered = [
-                m for m in filtered
-                if str(m.get("birthDate") or "")[:10] == str(birth_date)[:10]
-            ]
-            filtered = dob_filtered
-        if not filtered:
+        # Choose a match by name or birth date; never fall back to matches[0].
+        name_tokens = set((patient_name or "").lower().split())
+        chosen = None
+        for item in matches:
+            item_name = str(item.get("displayName") or item.get("patientName") or "").lower()
+            item_tokens = set(item_name.split())
+            if name_tokens and name_tokens.issubset(item_tokens) or (name_tokens and item_tokens and name_tokens == item_tokens):
+                chosen = item
+                break
+            if birth_date and item.get("birthDate"):
+                try:
+                    if str(item.get("birthDate"))[:10] == str(birth_date)[:10]:
+                        chosen = item
+                        break
+                    # also compare date part
+                    from datetime import datetime as _dt
+
+                    for fmt in _DATE_FORMATS:
+                        try:
+                            if _dt.strptime(str(item.get("birthDate"))[:10], "%Y-%m-%d").date() == _dt.strptime(str(birth_date)[:10], "%Y-%m-%d").date():
+                                chosen = item
+                                break
+                        except ValueError:
+                            continue
+                    if chosen:
+                        break
+                except Exception:
+                    continue
+        if chosen is None:
             return None
-        if len(filtered) > 1:
-            return {"ambiguous": True, "count": len(filtered)}
-        chosen = filtered[0]
 
         name = chosen.get("displayName") or chosen.get("patientName") or patient_name
         return {
@@ -684,8 +597,8 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             # The patient described an issue, but configured portal data has
             # no matching service. If the catalog is small, return the list of
             # service names so the model can ask the caller to choose.
-            if len(all_items) <= 3:
-                names = ", ".join(str(i.get("procedureDescription", "")).strip() for i in all_items if i.get("procedureDescription"))
+            if len(items) <= 3:
+                names = ", ".join(str(i.get("procedureDescription", "")).strip() for i in items if i.get("procedureDescription"))
                 return None, "__SERVICES__:" + names
             return None, ""
         return int(match["procedureId"]), str(match.get("procedureDescription", ""))
@@ -758,71 +671,6 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
         if operatories:
             return int(operatories[0].get("id"))
         return None
-
-    async def _session_booking_lock(self, token: str):
-        global _BOOKING_LOCKS, _BOOKING_LOCKS_GUARD
-        if "_BOOKING_LOCKS" not in globals():
-            _BOOKING_LOCKS = {}
-            _BOOKING_LOCKS_GUARD = asyncio.Lock()
-        async with _BOOKING_LOCKS_GUARD:
-            if token not in _BOOKING_LOCKS:
-                _BOOKING_LOCKS[token] = asyncio.Lock()
-            return _BOOKING_LOCKS[token]
-
-    async def _has_existing_appointment(
-        self, token: str, api: CustomerPortalHttpClient, patient: dict,
-        appointment_date: str, appointment_time: str, service_id: Optional[int],
-    ) -> bool:
-        try:
-            payload = {
-                "perPage": 20,
-                "page": 1,
-                "filter": {
-                    "startDate": appointment_date,
-                    "endDate": appointment_date,
-                    "status": [],
-                    "providerName": [],
-                    "services": [],
-                },
-                "sortKey": "startTime",
-                "sortValue": "asc",
-                "search": str(patient.get("name") or ""),
-            }
-            envelope = await api.list_appointments(token, payload)
-        except Exception:
-            return False
-        data = envelope.get("data") or {}
-        items = data.get("data") if isinstance(data, dict) else None
-        items = items or []
-        target_patient = str(patient.get("patientId") or patient.get("id") or "")
-        target_hm = None
-        for fmt in _TIME_FORMATS:
-            try:
-                target_hm = datetime.strptime(appointment_time.strip().upper(), fmt).strftime("%H:%M")
-                break
-            except ValueError:
-                continue
-        for item in items:
-            p = item.get("patient") or {}
-            pid = str(p.get("id") or p.get("patientId") or "")
-            if target_patient and pid and pid != target_patient:
-                continue
-            start = str(item.get("startTime") or "")
-            # The portal returns UTC; compare in the clinic's timezone.
-            local_start = to_clinic_datetime(start, get_clinic_zone(token))
-            existing_hm = (
-                local_start.strftime("%H:%M")
-                if local_start is not None
-                else (start[11:16] if len(start) >= 16 else "")
-            )
-            if target_hm and existing_hm and target_hm != existing_hm:
-                continue
-            if service_id is not None:
-                procs = item.get("procedureList") or []
-                if not any(int(x.get("procedureId") or x.get("id") or -1) == int(service_id) for x in procs):
-                    continue
-            return True
-        return False
 
     @staticmethod
     def _build_appointment_booking_payload(

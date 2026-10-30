@@ -72,7 +72,7 @@ async def list_appointments(
         ).validated()
     except DtoValidationError as error:
         return _dto_error(str(error))
-    return await client.list_appointments(token, request.to_payload())
+    return await client.list_appointments(token, request)
 
 
 @router.get("/{appointment_id}")
@@ -100,9 +100,6 @@ async def book_appointment(
     """
     try:
         request = AppointmentBookRequestDTO.from_dict(payload)
-        print('-------------------this is the request ---------------{request}')
     except DtoValidationError as error:
         return _dto_error(str(error))
-    appRes =await client.book_appointment(token, request)
-    print('-------this is appRes ------{appRes}')
-    return appRes
+    return await client.book_appointment(token, request)

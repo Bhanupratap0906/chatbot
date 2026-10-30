@@ -84,8 +84,6 @@ class AppointmentRepository(ABC):
         *,
         provider: Optional[str] = None,
         service: Optional[str] = None,
-        birth_date: Optional[str] = None,
-        gender: Optional[str] = None,
     ) -> str:
         """Persist an appointment and return a result for the assistant to report."""
 
