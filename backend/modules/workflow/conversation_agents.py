@@ -10,7 +10,7 @@ from modules.common.settings import get_settings
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import  BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 @dataclass(frozen=True)
