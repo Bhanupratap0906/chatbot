@@ -12,6 +12,7 @@ that need to customize a session.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from typing import Optional
@@ -32,6 +33,10 @@ logger = logging.getLogger("voice")
 
 
 router = APIRouter(tags=["Realtime"])
+
+# Small grace period after ``ready`` so the browser can start its audio
+# playback pipeline before the first greeting audio arrives.
+GREETING_START_DELAY_SECONDS = 0.3
 
 
 # ---------- per-IP concurrent connection limit ----------
@@ -69,7 +74,7 @@ def _log_task_exception(task: asyncio.Task) -> None:
     except (asyncio.CancelledError, asyncio.InvalidStateError):
         return
     if exc is not None:
-        logger.warning("send_configured_greeting failed: %r", exc)
+        logger.warning("send_configured_greeting failed: %r", exc, exc_info=exc)
 
 
 def _origin_allowed(origin: Optional[str], allowed: list[str]) -> bool:
@@ -84,6 +89,23 @@ def _token_looks_valid(token: Optional[str]) -> bool:
     if not token:
         return False
     return len(token.split(".")) == 3
+
+
+async def _run_greeting(session: RealtimeVoiceSession) -> None:
+    """Run the first greeting after a short delay.
+
+    ``start_configured_greeting`` may return a Task, a coroutine, or None
+    (if it schedules work internally); all three are handled here so the
+    caller always gets a real ``asyncio.Task`` to supervise.
+    """
+    await asyncio.sleep(GREETING_START_DELAY_SECONDS)
+    start_greeting = getattr(session, "start_configured_greeting", None)
+    if start_greeting is None:
+        await session.send_configured_greeting()
+        return
+    result = start_greeting()
+    if inspect.isawaitable(result):
+        await result
 
 
 async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSession) -> None:
@@ -103,7 +125,7 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
     ]
     # Runs once and finishes on its own — must not be in the FIRST_COMPLETED
     # race below, or the session tears down the instant the greeting ends.
-    greeting_task = asyncio.create_task(session.send_configured_greeting())
+    greeting_task = asyncio.create_task(_run_greeting(session))
     greeting_task.add_done_callback(_log_task_exception)
     settings = session._settings
     try:
@@ -118,6 +140,7 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
                 logger.warning("session ended: %r", exc)
     finally:
         greeting_task.cancel()
+        await asyncio.gather(greeting_task, return_exceptions=True)
         stop_background_tasks = getattr(session, "stop_background_tasks", None)
         if stop_background_tasks is not None:
             await stop_background_tasks()

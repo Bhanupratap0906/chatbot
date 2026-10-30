@@ -28,6 +28,12 @@ from modules.tools import TOOL_REGISTRY
 from modules.llm.llm_tool_call_executor import LlmToolCallExecutor
 logger = logging.getLogger("workflow.graph")
 
+# Output cap per LLM call. Groq counts max_tokens toward the TPM budget on
+# every request, so keep it as low as the replies allow.
+LLM_MAX_OUTPUT_TOKENS = 200
+# Token budget for the conversation history sent on each call.
+HISTORY_MAX_TOKENS = 3000
+
 
 def _is_rate_limit_error(error: Exception) -> bool:
     """Recognize Groq/OpenAI rate-limit (429) failures."""
@@ -65,6 +71,18 @@ def _looks_like_cut_off_utterance(text: str) -> bool:
     """Detect common STT fragments that should not trigger tools or questions."""
     normalized = re.sub(r"[,.!?]+$", "", (text or "").strip().lower()).strip()
     return normalized.endswith((" my name is", " and", " is"))
+
+
+_NO_DATE_PREFERENCE_RE = re.compile(
+    r"\b(earliest|soonest|first available|next available|any ?day|any date|"
+    r"whatever (day|date)|as soon as possible|asap|you tell me|you choose|you pick|when can i)\b",
+    re.IGNORECASE,
+)
+
+
+def _caller_has_no_date_preference(text: str) -> bool:
+    """True when the caller leaves the date to us ("earliest", "any day", "you tell me")."""
+    return bool(_NO_DATE_PREFERENCE_RE.search(text or ""))
 
 
 from modules.workflow.conversation_agents import AgentRole, AGENT_ROLES, messages_for_agent, route_to_agent
@@ -106,18 +124,34 @@ class ConversationWorkflow:
         settings = get_settings()
         self.model = settings.groq_model
         self.thread_id = thread_id or str(uuid.uuid4())
+        # Optional second model used when the primary hits a 429. Groq rate
+        # limits are per model, so a different model has its own quota.
+        self.fallback_llm = None
+        self.fallback_model = ""
         if llm is None:
             from langchain_groq import ChatGroq
 
             llm = ChatGroq(
                 model=self.model,
                 temperature=0,
-                max_tokens=settings.llm_max_tokens,
+                max_tokens=LLM_MAX_OUTPUT_TOKENS,
                 max_retries=settings.llm_max_retries,
                 timeout=settings.llm_timeout,
                 reasoning_format="hidden",
                 reasoning_effort="low",
             )
+            fallback_model = getattr(settings, "groq_fallback_model", "") or ""
+            if fallback_model and fallback_model != self.model:
+                self.fallback_model = fallback_model
+                self.fallback_llm = ChatGroq(
+                    model=fallback_model,
+                    temperature=0,
+                    max_tokens=LLM_MAX_OUTPUT_TOKENS,
+                    max_retries=0,
+                    timeout=settings.llm_timeout,
+                    reasoning_format="hidden",
+                    reasoning_effort="low",
+                )
         self.llm = llm
         self.guardrail = RegexInjectionGuardrail()
         self.tools = [*TOOL_REGISTRY, escalate_to_human]
@@ -136,6 +170,16 @@ class ConversationWorkflow:
                     _UsageCapturingAsyncClient(
                         original_client,
                         lambda usage: cost_tracker.add_llm_usage(usage, self.model),
+                    ),
+                )
+            if self.fallback_llm is not None and isinstance(self.fallback_llm, ChatGroq):
+                original_fallback_client = self.fallback_llm.async_client
+                object.__setattr__(
+                    self.fallback_llm,
+                    "async_client",
+                    _UsageCapturingAsyncClient(
+                        original_fallback_client,
+                        lambda usage: cost_tracker.add_llm_usage(usage, self.fallback_model),
                     ),
                 )
         self._saver = _get_or_create_thread_checkpointer(self.thread_id)
@@ -234,6 +278,36 @@ class ConversationWorkflow:
         )
         return {"response_text": answer}
 
+    async def _recover_from_rate_limit(self, agent, agent_llm, scoped_tools, messages, error):
+        """Handle a 429 from the primary model.
+
+        Order: (1) try the fallback model, which has its own quota; (2) wait
+        Groq's suggested delay and retry the primary once. Returns the
+        response, or None if the caller should be told the assistant is busy.
+        """
+        logger.warning("Groq 429 body: %r", str(error))
+        if self.fallback_llm is not None:
+            try:
+                logger.warning(
+                    "Groq 429 on agent=%s; switching to fallback model %s",
+                    agent.name,
+                    self.fallback_model,
+                )
+                return await self.fallback_llm.bind_tools(scoped_tools).ainvoke(messages)
+            except Exception as fallback_error:
+                logger.warning("fallback model failed: %r", fallback_error)
+        delay = _rate_limit_delay_seconds(error)
+        logger.warning("Groq 429 on agent=%s; retrying once in %.1fs", agent.name, delay)
+        await asyncio.sleep(delay)
+        try:
+            return await agent_llm.ainvoke(messages)
+        except Exception as retry_error:
+            if _is_rate_limit_error(retry_error):
+                logger.warning("Groq 429 body after retry: %r", str(retry_error))
+                logger.warning("Groq 429 persists after retry for agent=%s", agent.name)
+                return None
+            raise
+
     async def _respond(self, state: WorkflowState) -> dict[str, Any]:
         errors = dict(state.get("tool_errors", {}))
         calls = {
@@ -260,7 +334,7 @@ class ConversationWorkflow:
 
         conversation = trim_messages(
             history,
-            max_tokens=4000,
+            max_tokens=HISTORY_MAX_TOKENS,
             strategy="last",
             token_counter="approximate",
             include_system=True,
@@ -285,6 +359,7 @@ class ConversationWorkflow:
                 "agent_description": agent.description,
             },
         }
+        logger.info("assigned agent: %s", agent.name)
         assignment = {"agent": agent.name, "task": agent.description}
         if not self.agent_assignments or self.agent_assignments[-1] != assignment:
             self.agent_assignments.append(assignment)
@@ -305,6 +380,7 @@ class ConversationWorkflow:
             tool_errors=errors,
             tools_used=calls,
             max_tool_rounds=state.get("max_tool_rounds", 0),
+            booking_state=self.booking_state,
         )
         for name, error in errors.items():
             messages.append(
@@ -332,20 +408,11 @@ class ConversationWorkflow:
             response = await agent_llm.ainvoke(messages)
         except Exception as error:
             if _is_rate_limit_error(error):
-                delay = _rate_limit_delay_seconds(error)
-                # Log Groq's full body: it names the exact quota we hit
-                # (TPM / RPM / RPD) with Limit/Used/Requested numbers.
-                logger.warning("Groq 429 body: %r", str(error))
-                logger.warning("Groq 429 on agent=%s; retrying once in %.1fs", agent.name, delay)
-                await asyncio.sleep(delay)
-                try:
-                    response = await agent_llm.ainvoke(messages)
-                except Exception as retry_error:
-                    if _is_rate_limit_error(retry_error):
-                        logger.warning("Groq 429 body after retry: %r", str(retry_error))
-                        logger.warning("Groq 429 persists after retry for agent=%s", agent.name)
-                        return {"messages": [AIMessage(content="RATE_LIMIT_BUSY")], **assigned}
-                    raise
+                response = await self._recover_from_rate_limit(
+                    agent, agent_llm, scoped_tools, messages, error
+                )
+                if response is None:
+                    return {"messages": [AIMessage(content="RATE_LIMIT_BUSY")], **assigned}
             elif not is_tool_validation_error(error):
                 raise
             else:
@@ -612,7 +679,7 @@ class ConversationWorkflow:
             for tool_message in new_tool_messages:
                 content = str(tool_message.content)
                 if len(content) > 2000:
-                    tool_message.content = content[:2000] + "...[truncated]" 
+                    tool_message.content = content[:2000] + "...[truncated]"
             for tool_message in new_tool_messages:
                 content = str(tool_message.content).lower()
                 if any(marker in content for marker in ("not found", "failed", "could not", "unreachable", "not signed in")):
@@ -716,6 +783,13 @@ class ConversationWorkflow:
         # tasks inherit this context, so book_appointment sees the same state.
         set_booking_state(self.booking_state)
         self.booking_state.record_caller_utterance(text)
+        if _caller_has_no_date_preference(text):
+            # No preferred date means "search from today"; find_available_slots
+            # walks forward to the next open day.
+            self.booking_state.appointment_date_provided = True
+        # TEMP DEBUG: shows what the booking state captured (name, dob, phone, ...).
+        # Remove or mask before production use; it can contain caller details.
+        logger.info("booking_state: %s", vars(self.booking_state))
         if not self.guardrail.is_allowed(text):
             yield "I'm here to help with dental clinic questions and appointments. How can I help?"
             return

@@ -71,7 +71,7 @@ class Settings:
 
     barge_in: bool = field(default_factory=lambda: _as_bool(os.getenv("BARGE_IN"), False))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))
-    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "512")))
+    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "200")))
     # Voice callers should get an immediate fallback instead of waiting through
     # a provider Retry-After delay that can exceed the turn timeout.
     llm_max_retries: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "0")))
@@ -85,7 +85,7 @@ class Settings:
     )
     history_window: int = field(default_factory=lambda: int(os.getenv("HISTORY_WINDOW", "8")))
     clinic_timezone: str = field(default_factory=lambda: os.getenv("CLINIC_TIMEZONE", "Asia/Kolkata"))
-    no_answer_timeout: float = field(default_factory=lambda: float(os.getenv("NO_ANSWER_TIMEOUT", "10")))
+    no_answer_timeout: float = field(default_factory=lambda: float(os.getenv("NO_ANSWER_TIMEOUT", "20")))
 
     # Customer portal (Daily) API — login page hands credentials to the
     # backend, which exchanges them for the portal JWT and mirrors it into

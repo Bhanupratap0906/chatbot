@@ -7,7 +7,8 @@ them up conversationally:
 * ``find_patient_by_phone``  — confirm a record exists before booking,
 * ``list_services``          — offer the clinic's services,
 * ``list_providers``         — offer the clinic's providers,
-* ``find_available_slots``   — offer real open times for a date.
+* ``find_available_slots``   — offer real open times; if the requested date is
+  full, search forward and return the next available date.
 
 All of them return speakable strings and never raise into the LLM loop.
 """
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -26,12 +27,17 @@ from modules.portal.portal_http_client import get_shared_portal_http_client
 from modules.portal.dtos import GetAppointmentSlotsRequestDto, SlotViewType
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
 from modules.portal.session import resolve_active_location_id, encrypt_location_id_for_portal
-from modules.tools.portal_appointment_booking_repository import _find_item_by_case_insensitive_name, _map_patient_problem_to_service_keywords, _find_best_item_by_keyword_score, _format_date_for_speech
+from modules.tools.portal_appointment_booking_repository import _find_item_by_case_insensitive_name, _map_patient_problem_to_service_keywords, _find_best_item_by_keyword_score, _format_date_for_speech, get_clinic_zone, to_clinic_datetime
 from modules.portal.token_store import get_portal_token
 from modules.common.booking_state import get_booking_state
 from modules.tools.tool_registry import TOOL_REGISTRY
 
 logger = logging.getLogger("tool.lookup")
+
+# How many days after the requested date to search when that date is full.
+MAX_LOOKAHEAD_DAYS = 10
+# Most open times returned for the chosen date.
+MAX_OFFERED_TIMES = 6
 
 
 def _map_portal_error_to_speakable_message(error: Exception) -> str:
@@ -166,20 +172,62 @@ async def list_providers() -> str:
     )
 
 
+def _extract_open_times(items: list, now_tz: datetime) -> list[str]:
+    """Speakable open times from one day's slot list; drops booked and past slots."""
+    times: list[str] = []
+    for item in items:
+        status = str(item.get("status") or "").lower()
+        if status in ("booked", "closed", "unavailable", "blocked"):
+            continue
+        open_time = str(item.get("open") or "")[11:16]
+        if not open_time or ":" not in open_time:
+            continue
+        try:
+            speakable = datetime.strptime(open_time, "%H:%M").strftime("%I:%M %p").lstrip("0")
+        except ValueError:
+            speakable = open_time
+        # Drop slots already past (or within 15 minutes) when the day is today.
+        try:
+            slot_day = datetime.strptime(str(item.get("open") or "")[:10], "%Y-%m-%d").date()
+            if slot_day == now_tz.date():
+                slot_minutes = int(open_time[:2]) * 60 + int(open_time[3:5])
+                if slot_minutes < now_tz.hour * 60 + now_tz.minute + 15:
+                    continue
+        except Exception:
+            pass
+        if speakable not in times:
+            times.append(speakable)
+        if len(times) >= MAX_OFFERED_TIMES:
+            break
+    return times
+
+
 @tool
 async def find_available_slots(appointment_date: str, service: Optional[str] = None) -> str:
     """
-    Find available appointment time slots for a date.
+    Find available appointment time slots. If the requested date has none,
+    automatically searches the following days and returns the next available date.
 
     Args:
-        appointment_date: Date to check, as YYYY-MM-DD (e.g. "2026-09-25").
+        appointment_date: Date to start checking, as YYYY-MM-DD (e.g. "2026-09-25").
         service: Optional service name to scope the search (e.g. "Cleaning").
     """
     token = _get_portal_session_token_or_none()
     if not token:
         return _map_portal_error_to_speakable_message(PortalAuthError("no session"))
 
+    now_tz = datetime.now(get_clinic_zone(token))
+    try:
+        requested = datetime.strptime(appointment_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "That date was not valid. Ask the caller for the date again."
+    start = max(requested, now_tz.date())  # never search the past
+
     api = get_shared_portal_http_client()
+    found_day: Optional[str] = None
+    times: list[str] = []
+    day_errors = 0
+    last_error: Optional[Exception] = None
     try:
         location_id = await _resolve_active_location_for_session(token)
         if not location_id:
@@ -193,55 +241,56 @@ async def find_available_slots(appointment_date: str, service: Optional[str] = N
             match = _find_best_item_by_keyword_score(services, _map_patient_problem_to_service_keywords(service))
         if match is None:
             match = services[0]
-        payload = GetAppointmentSlotsRequestDto(
-            viewType=SlotViewType.DAY,
-            serviceId=int(match["procedureId"]),
-            locationId=encrypt_location_id_for_portal(location_id),
-            startDate=appointment_date,
-            endDate=appointment_date,
-        )
-        logger.debug(
-            "find_available_slots: date=%s service=%s service_id=%s",
-            appointment_date, service, match["procedureId"],
-        )
-        envelope = await api.get_appointment_slots(payload)
+
+        for offset in range(MAX_LOOKAHEAD_DAYS + 1):
+            day = (start + timedelta(days=offset)).isoformat()
+            payload = GetAppointmentSlotsRequestDto(
+                viewType=SlotViewType.DAY,
+                serviceId=int(match["procedureId"]),
+                locationId=encrypt_location_id_for_portal(location_id),
+                startDate=day,
+                endDate=day,
+            )
+            logger.debug("find_available_slots: date=%s service_id=%s", day, match["procedureId"])
+            try:
+                envelope = await api.get_appointment_slots(payload)
+            except PortalAuthError:
+                raise
+            except PortalApiError as error:
+                # An empty day may come back as an API error; treat it as "no slots".
+                logger.debug("find_available_slots: %s -> %r", day, error)
+                day_errors += 1
+                last_error = error
+                continue
+            # The portal returns HTTP 201 with an inner 404 for empty days, so check the data.
+            times = _extract_open_times(envelope.get("data") or [], now_tz)
+            if times:
+                found_day = day
+                break
     except (PortalApiError, PortalNetworkError) as error:
         return _map_portal_error_to_speakable_message(error)
 
-    from modules.common.settings import get_settings
-    settings = get_settings()
-    now_tz = datetime.now(ZoneInfo(settings.clinic_timezone))
-    items = envelope.get("data") or []
-    times = []
-    for item in items:
-        status = str(item.get("status") or "").lower()
-        if status in ("booked", "closed", "unavailable", "blocked"):
-            continue
-        open_time = str(item.get("open") or "")[11:16]
-        if not open_time or ":" not in open_time:
-            continue
-        try:
-            speakable = datetime.strptime(open_time, "%H:%M").strftime("%I:%M %p").lstrip("0")
-        except ValueError:
-            speakable = open_time
-        # Drop slots already past in clinic timezone when checking today.
-        try:
-            slot_dt = datetime.strptime(str(item.get("open") or "")[:10], "%Y-%m-%d")
-            if slot_dt.date() == now_tz.date():
-                slot_hour, slot_min = int(open_time.split(":")[0]), int(open_time.split(":")[1])
-                if slot_hour < now_tz.hour or (slot_hour == now_tz.hour and slot_min < now_tz.minute + 15):
-                    continue  # skip past / too-close slots
-        except Exception:
-            pass
-        if speakable not in times:
-            times.append(speakable)
-        if len(times) >= 6:
-            break
-    if not times:
+    if found_day is None:
         get_booking_state().replace_offered_slots([])
-        return f"No open slots found on {_format_date_for_speech(appointment_date)}."
+        if last_error is not None and day_errors > MAX_LOOKAHEAD_DAYS:
+            return _map_portal_error_to_speakable_message(last_error)
+        last_day = (start + timedelta(days=MAX_LOOKAHEAD_DAYS)).isoformat()
+        return (
+            f"No open slots from {_format_date_for_speech(start.isoformat())} through "
+            f"{_format_date_for_speech(last_day)}. Offer to connect the caller to the front desk."
+        )
+
     get_booking_state().replace_offered_slots(times)
-    return f"Open times on {_format_date_for_speech(appointment_date)}: " + ", ".join(times)
+    spoken_day = _format_date_for_speech(found_day)
+    if found_day == appointment_date:
+        return f"Open times on {spoken_day} ({found_day}): " + ", ".join(times)
+    return (
+        f"No open slots on {_format_date_for_speech(appointment_date)}. "
+        f"The next available date is {spoken_day} ({found_day}). "
+        "Open times: " + ", ".join(times) + ". "
+        "Tell the caller the date changed, offer at most two times, and use "
+        f"{found_day} as the appointment date when booking."
+    )
 
 
 TOOL_REGISTRY.append(find_patient_by_phone)
@@ -302,13 +351,11 @@ async def get_appointments(
             for p in procedures
         )
         start = str(item.get("startTime") or "")
-        # Convert ISO to speakable if possible.
+        # The portal returns UTC; speak the time in the clinic's timezone.
         spoken = start
-        try:
-            dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            spoken = dt.strftime("%B %d, %Y at %I:%M %p").lstrip("0").replace(" 0", " ")
-        except ValueError:
-            pass
+        local_dt = to_clinic_datetime(start, get_clinic_zone(token))
+        if local_dt is not None:
+            spoken = local_dt.strftime("%B %d, %Y at %I:%M %p").lstrip("0").replace(" 0", " ")
         status = item.get("bookingStatus") or ""
         lines.append(
             f"{name} ({phone}) - {service} with {provider} on {spoken} [{status}]"

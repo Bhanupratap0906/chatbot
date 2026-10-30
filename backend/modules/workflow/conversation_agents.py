@@ -83,7 +83,11 @@ RULES
 - If the caller expresses confusion or refuses information (e.g., "What did I say?", "I'm not telling you", "Why are you asking again?"), acknowledge briefly, clarify what you need, and do not repeat the exact same sentence. Example: "I need your date of birth to proceed. Could you share that with me?"
 - Never call list_services or find_available_slots twice in the same turn unless the previous result was blocked by a tool error. If services or slots were already fetched and the user is still discussing the same request, use the previous result.
 - Never invent or substitute a phone number. If the caller does not provide one, ask clearly once. If they refuse, say: "Without a phone number I cannot complete the booking. Would you like to provide it, or should I help with something else?"
-- If the user mentions a year like "2048", treat it as the birth year for the date of birth, not as a booking year. Ask for clarification naturally.""",
+- If the user mentions a year like "2048", treat it as the birth year for the date of birth, not as a booking year. Ask for clarification naturally.
+- If the caller has no date preference ("any day", "whatever works", "as soon as possible"), that counts as the preferred date: use today's date. The availability tool searches forward and returns the next open date.
+- If the availability result says the date changed, tell the caller the new date in one short sentence, offer at most two times, and use that new date (not the original one) when you book.
+- Details listed as "Already collected" in the system notes are known. Never ask for them again; ask only for the item named as next.
+- Speech-to-text can mishear the gender answer: "meal" or "mail" means male. Accept it and move on.""",
 
         tools=frozenset({
             "list_services", "list_providers", "find_available_slots", "book_appointment",
@@ -141,7 +145,17 @@ def route_to_agent(messages: list[BaseMessage], current: str | None = None) -> A
     return AGENT_ROLES["dental_care"]
 
 
-_MAX_CONVERSATION_MESSAGES = 12
+_MAX_CONVERSATION_MESSAGES = 30
+
+# (label spoken to the model, BookingState attribute) in booking-flow order.
+_BOOKING_DETAIL_FLAGS = (
+    ("full name", "patient_name_provided"),
+    ("date of birth", "birth_date_provided"),
+    ("mobile number", "mobile_number_provided"),
+    ("gender", "gender_provided"),
+    ("reason for the visit", "visit_reason_provided"),
+    ("preferred date", "appointment_date_provided"),
+)
 
 
 def _trim_conversation(conversation: list[BaseMessage]) -> list[BaseMessage]:
@@ -160,6 +174,31 @@ def _trim_conversation(conversation: list[BaseMessage]) -> list[BaseMessage]:
     return trimmed[start:]
 
 
+def _collected_details_note(booking_state: Any) -> str:
+    """Tell the model which booking details the code already captured.
+
+    The model sometimes re-asks for details it was given earlier. The code-side
+    BookingState is the source of truth, so state it explicitly every turn.
+    """
+    collected = [
+        label for label, attr in _BOOKING_DETAIL_FLAGS
+        if getattr(booking_state, attr, False)
+    ]
+    if not collected:
+        return ""
+    note = (
+        "Already collected from the caller (never ask for these again): "
+        + ", ".join(collected) + "."
+    )
+    try:
+        next_item = booking_state.first_missing_information()
+    except Exception:
+        next_item = None
+    if next_item:
+        note += f" Ask only for this next: {next_item}."
+    return note
+
+
 def messages_for_agent(
     role: AgentRole,
     conversation: list[BaseMessage],
@@ -167,6 +206,7 @@ def messages_for_agent(
     tool_errors: dict[str, str] | None = None,
     tools_used: dict[str, int] | None = None,
     max_tool_rounds: int = 0,
+    booking_state: Any | None = None,
 ) -> list[BaseMessage]:
     """Build the agent's scoped context, including its task and allowed tools."""
     settings = get_settings()
@@ -193,6 +233,10 @@ def messages_for_agent(
         ),
         *_trim_conversation(conversation),
     ]
+    if booking_state is not None and role.name == "appointments":
+        note = _collected_details_note(booking_state)
+        if note:
+            messages.append(SystemMessage(content=note))
     for name, error in (tool_errors or {}).items():
         messages.append(
             SystemMessage(

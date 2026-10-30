@@ -17,10 +17,13 @@ exceptions escape to the LLM loop.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import re
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from modules.common.backend_contracts import AppointmentRepository as IAppointmentRepository
 from modules.common.settings import get_settings
@@ -37,6 +40,59 @@ from modules.portal.token_store import PortalTokenStore, portal_token_store
 from modules.common.redact import redact
 
 logger = logging.getLogger("booking")
+
+# JWT claim names that may carry the clinic's IANA timezone (e.g. "Asia/Kolkata").
+_TIMEZONE_CLAIM_KEYS = ("timezone", "timeZone", "tz", "locationTimezone", "locationTimeZone")
+
+
+def _timezone_name_from_token(token: Optional[str]) -> Optional[str]:
+    """Read a timezone claim from the portal JWT payload (read-only, no signature check)."""
+    if not token or token.count(".") != 2:
+        return None
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    for key in _TIMEZONE_CLAIM_KEYS:
+        value = claims.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def get_clinic_zone(token: Optional[str] = None) -> ZoneInfo:
+    """Clinic timezone: the token's timezone claim if present and valid, else settings."""
+    for name in (_timezone_name_from_token(token), get_settings().clinic_timezone):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            logger.warning("invalid timezone name %r", name)
+    return ZoneInfo("UTC")
+
+
+def to_clinic_datetime(value: str, zone: ZoneInfo) -> Optional[datetime]:
+    """Parse a portal ISO timestamp and express it in the clinic timezone.
+
+    The portal returns appointment times in UTC (e.g. ``...T08:55:00+00:00``).
+    Timestamps with an offset are converted; timestamps without one are
+    already clinic-local and are returned as-is.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=zone)
+    return parsed.astimezone(zone)
 
 # Tolerated input formats for the conversational date/time arguments.
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%B %d %Y", "%b %d %Y", "%B %d, %Y", "%b %d, %Y")
@@ -241,7 +297,12 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
         birth_date: Optional[str] = None,
         gender: Optional[str] = None,
     ) -> str:
-        """Book one appointment; always returns a patient-facing result string."""
+        """Book one appointment; always returns a patient-facing result string.
+
+        ``appointment_date`` is used exactly as passed in. When
+        ``find_available_slots`` moved the caller to the next available day,
+        the assistant must pass that new date here.
+        """
         token = self._token_store.get()
         if not token:
             logger.warning("failed: portal auth token is missing")
@@ -252,6 +313,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
 
         try:
             patient = await self._find_patient_by_mobile_number(token, mobile_number, patient_name, birth_date)
+            logger.debug("patient lookup done: found=%s", bool(patient))
             if isinstance(patient, dict) and patient.get("ambiguous"):
                 return (
                     "I found more than one patient with that phone number. "
@@ -623,7 +685,7 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             # no matching service. If the catalog is small, return the list of
             # service names so the model can ask the caller to choose.
             if len(all_items) <= 3:
-                names = ", ".join(str(i.get("procedureDescription", "")).strip() for i in items if i.get("procedureDescription"))
+                names = ", ".join(str(i.get("procedureDescription", "")).strip() for i in all_items if i.get("procedureDescription"))
                 return None, "__SERVICES__:" + names
             return None, ""
         return int(match["procedureId"]), str(match.get("procedureDescription", ""))
@@ -746,11 +808,13 @@ class PortalAppointmentBookingRepository(IAppointmentRepository):
             if target_patient and pid and pid != target_patient:
                 continue
             start = str(item.get("startTime") or "")
-            existing_hm = start[11:16] if len(start) >= 16 else ""
-            try:
-                existing_hm = datetime.fromisoformat(start.replace("Z", "+00:00")).strftime("%H:%M")
-            except ValueError:
-                pass
+            # The portal returns UTC; compare in the clinic's timezone.
+            local_start = to_clinic_datetime(start, get_clinic_zone(token))
+            existing_hm = (
+                local_start.strftime("%H:%M")
+                if local_start is not None
+                else (start[11:16] if len(start) >= 16 else "")
+            )
             if target_hm and existing_hm and target_hm != existing_hm:
                 continue
             if service_id is not None:

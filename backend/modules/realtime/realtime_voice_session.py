@@ -32,7 +32,6 @@ from modules.common.redact import redact
 from modules.llm.sentence_chunk_splitter import SentenceChunkSplitter
 from modules.realtime.greeting_service import GreetingService
 from modules.realtime.conversation_history import InMemoryConversationHistory
-from modules.realtime.conversation_coordinator import ConversationCoordinator, BookingState
 from modules.tts.voice_catalog import VOICES
 
 logger = logging.getLogger("session")
@@ -368,6 +367,7 @@ class RealtimeVoiceSession:
             dg=self.dg,
         )
         self._no_answer_task: asyncio.Task | None = None
+        self._greeting_task: asyncio.Task | None = None
         self._last_assistant_text: str = ""
         self._no_answer_repeats: int = 0
         self._greeting = GreetingService(
@@ -377,8 +377,6 @@ class RealtimeVoiceSession:
             greeting_text=self._settings.greeting_text,
             voice=self.voice,
         )
-        # Shared session coordinator for Speaking Agent + Booking Agent
-        self.coordinator = ConversationCoordinator(session_id=self.session_id)
     @property
     def turn(self):
         """Return the active turn task for controller cleanup."""
@@ -419,6 +417,7 @@ class RealtimeVoiceSession:
                         self.voice = voice
                         self._greeting._voice = voice
                 elif payload.get("type") == "interrupt":
+                    await self.cancel_configured_greeting()
                     await self.cancel_active_assistant_turn()
         finally:
             try:
@@ -450,6 +449,10 @@ class RealtimeVoiceSession:
         event = json.loads(raw)
         kind = event.get("type")
         if kind == "SpeechStarted":
+            # The greeting runs independently from assistant turns. Stop it as
+            # soon as the caller speaks so greeting audio cannot overlap the
+            # caller or the first generated response.
+            await self.cancel_configured_greeting()
             if self._settings.barge_in:
                 logger.info("stt speech started -> cancelling turn")
                 self._cancel_prompt_caller_after_silence()
@@ -460,8 +463,8 @@ class RealtimeVoiceSession:
             is_final = event.get("is_final", False)
             speech_final = event.get("speech_final", False)
             if transcript:
-                # TEMP DEBUG: print every transcript exactly as the UI sees it.
-                # Retains nothing; remove or mask before production use.
+                self._cancel_prompt_caller_after_silence()   # caller is speaking, stop "Are you still there?"
+                await self.cancel_configured_greeting()      # caller spoke over greeting
                 print(f"STT [{'final' if is_final else 'interim'}]: {transcript}", flush=True)
                 await self._publisher.send_json(
                     {"type": "transcript", "text": transcript, "final": is_final}
@@ -531,25 +534,33 @@ class RealtimeVoiceSession:
     async def start_assistant_turn_from_buffer(self):
         """Consume buffered speech and schedule its assistant response; called on final utterance events."""
         self._cancel_prompt_caller_after_silence()
+        await self.cancel_configured_greeting()
         text = self._buffer.take_pending_transcript()
         if not text:
             return
-        # Record utterance with coordinator for intent-aware routing
-        await self.coordinator.receive_utterance(text)
-        # Ignore backchannels/short utterances while the agent is speaking.
+        # Ignore only passive backchannels while the agent is speaking. A short
+        # but meaningful reply ("no", a name, a date, etc.) must start a turn.
+        # A clear affirmative after the workflow's booking read-back must also
+        # reach ConversationWorkflow so its caller-owned BookingState records
+        # the confirmation; there is deliberately no second coordinator state.
         words = text.lower().split()
         if self.turns.task is not None and not self.turns.task.done():
-            if len(words) <= 2 or all(w.strip(".,!?") in self._BACKCHANNELS for w in words):
-                # If a confirmation is pending, treat affirmative backchannel as confirmation
-                if self.coordinator.state.booking_status == BookingState.AWAITING_PATIENT_CONFIRMATION:
-                    affirmative_words = {"yes", "yeah", "yep", "correct", "right", "sure", "go ahead", "confirm"}
-                    is_affirmative = any(w.strip(".,!?") in affirmative_words for w in words)
-                    if is_affirmative:
-                        await self.coordinator.confirm_pending_booking()
-                        # Speak acknowledgment without restarting full turn
-                        await self._publisher.send_json({"type": "token", "text": "Thank you for confirming. I'll finalize that now."})
-                        return
-                logger.info("ignoring backchannel/short utterance while speaking: %r", redact(text))
+            normalized_words = [word.strip(".,!?") for word in words]
+            is_backchannel = bool(normalized_words) and all(
+                word in self._BACKCHANNELS for word in normalized_words
+            )
+            booking_state = getattr(self.workflow, "booking_state", None)
+            confirmation_pending = bool(
+                booking_state is not None
+                and booking_state.readback_done
+                and not booking_state.user_confirmed
+            )
+            affirmative = any(
+                word in {"yes", "yeah", "yep", "correct", "right", "sure", "confirm"}
+                for word in normalized_words
+            )
+            if is_backchannel and not (confirmation_pending and affirmative):
+                logger.info("ignoring passive backchannel while speaking: %r", redact(text))
                 return
         await self.turns.start_assistant_turn(text)
 
@@ -569,6 +580,7 @@ class RealtimeVoiceSession:
         self._cancel_prompt_caller_after_silence()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        await self.cancel_configured_greeting(notify_client=False)
 
     async def _handle_turn_completion(self, answer: str) -> None:
         self._last_assistant_text = (answer or "").strip()
@@ -583,7 +595,10 @@ class RealtimeVoiceSession:
             if self._no_answer_repeats >= 1:
                 return
             self._no_answer_repeats += 1
-            prompt = "Thanks for waiting." + self._last_assistant_text
+            reminder = self._last_assistant_text[:40].strip()
+            prompt = (
+                "Are you still there?" + (f" {reminder}" if reminder else "")
+            )[:100]
             await self._publisher.send_json({"type": "token", "text": prompt})
             voice = self.voice
             async def send_with_log(chunk: bytes):
@@ -599,6 +614,24 @@ class RealtimeVoiceSession:
         # Rebuild with current voice (voice may change via config).
         self._greeting._voice = self.voice
         await self._greeting.send()
+
+    def start_configured_greeting(self) -> asyncio.Task:
+        """Start and retain the greeting task so caller speech can interrupt it."""
+        if self._greeting_task is None or self._greeting_task.done():
+            self._greeting_task = asyncio.create_task(self.send_configured_greeting())
+        return self._greeting_task
+
+    async def cancel_configured_greeting(self, *, notify_client: bool = True) -> bool:
+        """Cancel an active greeting and clear already queued browser audio."""
+        task = self._greeting_task
+        self._greeting_task = None
+        if task is None or task.done():
+            return False
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if notify_client:
+            await self._publisher.send_json({"type": "interrupt"})
+        return True
 
 class _SpeakerAdapter:
     """Adapts TTS for GreetingService (DIP). Respects the voice passed in."""
