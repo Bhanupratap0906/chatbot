@@ -67,15 +67,22 @@ class ConversationCostTracker:
         )
 
     def print_summary(self) -> None:
-        """Print the accumulated speech and model charges when the voice session ends."""
+        """Log the accumulated speech and model charges when the voice session ends."""
+        import json as _json
+
         stt_minutes = self.stt_audio_seconds / 60
         stt_cost = stt_minutes * self._settings.deepgram_stt_price_per_minute
         total = stt_cost + self._tts_cost + self.llm_cost
-        logger.info(
-            "conversation summary STT=%.2fs/$%.8f TTS=%d chars/$%.8f "
-            "LLM=%d requests, input=%d tokens (cached=%d), output=%d tokens/$%.8f TOTAL=$%.8f",
-            self.stt_audio_seconds, stt_cost,
-            self.tts_characters, self._tts_cost,
-            self._llm_requests, self.llm_input_tokens, self.llm_cached_input_tokens,
-            self.llm_output_tokens, self.llm_cost, total,
-        )
+        summary = {
+            "stt_seconds": round(self.stt_audio_seconds, 3),
+            "stt_cost_usd": round(stt_cost, 8),
+            "tts_chars": self.tts_characters,
+            "tts_cost_usd": round(self._tts_cost, 8),
+            "llm_requests": self._llm_requests,
+            "llm_input_tokens": self.llm_input_tokens,
+            "llm_cached_input_tokens": self.llm_cached_input_tokens,
+            "llm_output_tokens": self.llm_output_tokens,
+            "llm_cost_usd": round(self.llm_cost, 8),
+            "total_cost_usd": round(total, 8),
+        }
+        logger.info("conversation summary %s", _json.dumps(summary))

@@ -34,6 +34,7 @@ class TextToSpeechService:
         self.generator = generator or DeepgramAudioGenerator(
             api_key=api_key, cost_tracker=cost_tracker
         )
+        self.cost_tracker = cost_tracker
         self.speaker = speaker or ThreadedTextToSpeechSpeaker(self.generator.generate_audio_chunks)
 
     # ---------- SRP: validation only ----------

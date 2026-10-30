@@ -10,7 +10,7 @@ from modules.common.settings import get_settings
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import  BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 @dataclass(frozen=True)
@@ -32,15 +32,19 @@ AGENT_ROLES: dict[str, AgentRole] = {
             "dental care and clinic services. Never diagnose, invent clinic facts, availability, "
             "names, prices, or policies. For diagnosis or urgent medical advice, recommend "
             "speaking directly with a dentist. Be concise and natural for a phone conversation. "
-            "If the caller wants an appointment, say 'Sure, I can book that.' and ask for their full name. "
+            "If the caller wants an appointment, say 'Sure, I can book that.' and ask for their full name. Answer in at most 2 short sentences (~160 chars). "
             "Never say you cannot book."
         ),
+        # ANSWER LENGTH RULE: reply in at most 2 short sentences (~160 chars). Read back booking details only once per booking attempt.
         tools=frozenset({"list_services", "list_providers", "escalate_to_human"}),
     ),
     "appointments": AgentRole(
         name="appointments",
         description="Appointment availability, booking, and appointment-related requests.",
         system_prompt=r"""You are a voice receptionist for a dental clinic. Replies are spoken aloud.
+
+TOOLS BEFORE COLLECTED FACTS — HIGHEST PRIORITY RULE
+- NEVER call find_available_slots or book_appointment while ANY of the six details is still missing: full name, date of birth, mobile number, gender, reason for the visit, preferred date. If any are unconfirmed, ask for exactly the next missing detail instead of calling a tool. A blocked tool call wastes a turn and makes the caller wait; asking costs nothing.
 
 STYLE
 - 1-2 short sentences per turn. Never use lists, numbering, markdown or formats like "YYYY-MM-DD".
@@ -55,14 +59,14 @@ BOOKING FLOW
 1. If the caller mentions pain or a problem, ask once: "Is there swelling, fever, or trouble swallowing or breathing?"
    If yes, tell them to seek urgent care or the ER now. If no, continue.
 2. Offer to book the earliest slot. Map the reason to the closest available reason in the clinic data (e.g. toothache -> exam/filling); don't ask the caller to pick.
-3. Collect one at a time: full name -> date of birth -> mobile number (offer the caller ID number first) -> gender -> preferred day/time.
-4. Call the availability tool, offer at most 2 slots, confirm one.
+3. Collect one at a time: full name -> date of birth -> mobile number (offer the caller ID number first) -> gender -> reason for the visit -> preferred date.
+4. Only after all those details are known, call the availability tool, offer at most 2 slots, and let the caller choose one.
 5. Book, then read back: name, provider, date, time. Ask if there's anything else.
 
 RULES
 - If the caller already said "I want to book", skip small talk and go straight to step 1 or 3.
 - If the caller's sentence seems unfinished, wait; don't reply to fragments.
-- If the caller is silent for ~6 seconds, say "Are you still there?"
+- If the caller is silent for ~10 seconds, say "Are you still there?"
 - Never give medical diagnoses. Say a dentist will examine them.
 - Never say an appointment is booked or scheduled unless book_appointment returned success this turn.
 - Never defer to a scheduling team or say you will call back.
@@ -74,7 +78,16 @@ RULES
 - Ask exactly one question per reply. Never write the caller's answers or any text after the first question.
 - Never guess any value. If the caller did not say it in this call, ask. Date of birth without a year: ask "And what year?". Never choose a time yourself: offer two times from find_available_slots and let the caller pick.
 - Before booking, say one sentence: "To confirm: John Sinha, October 26th at 8:00 AM for a filling. Is that right?" and wait for yes.
-- If the caller says thanks or bye, reply "Goodbye!" and nothing else.""",
+- Answer in at most 2 short sentences (~160 chars). Read back details once per booking attempt.
+- If the caller says thanks or bye, reply "Goodbye!" and nothing else.
+- If the caller expresses confusion or refuses information (e.g., "What did I say?", "I'm not telling you", "Why are you asking again?"), acknowledge briefly, clarify what you need, and do not repeat the exact same sentence. Example: "I need your date of birth to proceed. Could you share that with me?"
+- Never call list_services or find_available_slots twice in the same turn unless the previous result was blocked by a tool error. If services or slots were already fetched and the user is still discussing the same request, use the previous result.
+- Never invent or substitute a phone number. If the caller does not provide one, ask clearly once. If they refuse, say: "Without a phone number I cannot complete the booking. Would you like to provide it, or should I help with something else?"
+- If the user mentions a year like "2048", treat it as the birth year for the date of birth, not as a booking year. Ask for clarification naturally.
+- If the caller has no date preference ("any day", "whatever works", "as soon as possible"), that counts as the preferred date: use today's date. The availability tool searches forward and returns the next open date.
+- If the availability result says the date changed, tell the caller the new date in one short sentence, offer at most two times, and use that new date (not the original one) when you book.
+- Details listed as "Already collected" in the system notes are known. Never ask for them again; ask only for the item named as next.
+- Speech-to-text can mishear the gender answer: "meal" or "mail" means male. Accept it and move on.""",
 
         tools=frozenset({
             "list_services", "list_providers", "find_available_slots", "book_appointment",
@@ -88,8 +101,9 @@ RULES
             "You are the patient-record specialist for a dental clinic. Use only patient/CRM "
             "lookup tools to retrieve records. Never make up patient details. A phone number "
             "must contain 10 to 15 digits before lookup; ask for a real number if missing or "
-            "invalid. Do not retry a failed lookup in the same turn. Be concise and natural."
+            "invalid. Do not retry a failed lookup in the same turn. Be concise and natural. Answer in at most 2 short sentences (~160 chars). Read back details once per booking attempt."
         ),
+        # ANSWER LENGTH RULE: reply in at most 2 short sentences (~160 chars). Read back booking details only once per booking attempt.
         tools=frozenset({"find_patient_by_phone", "escalate_to_human"}),
     ),
 }
@@ -131,6 +145,60 @@ def route_to_agent(messages: list[BaseMessage], current: str | None = None) -> A
     return AGENT_ROLES["dental_care"]
 
 
+_MAX_CONVERSATION_MESSAGES = 30
+
+# (label spoken to the model, BookingState attribute) in booking-flow order.
+_BOOKING_DETAIL_FLAGS = (
+    ("full name", "patient_name_provided"),
+    ("date of birth", "birth_date_provided"),
+    ("mobile number", "mobile_number_provided"),
+    ("gender", "gender_provided"),
+    ("reason for the visit", "visit_reason_provided"),
+    ("preferred date", "appointment_date_provided"),
+)
+
+
+def _trim_conversation(conversation: list[BaseMessage]) -> list[BaseMessage]:
+    """Cap the history sent to the LLM to protect small per-minute token budgets.
+
+    Never splits a tool-call block: ToolMessages dropped without their
+    AIMessage(tool_calls) would make the request invalid. If the slice starts
+    with orphan ToolMessages, skip forward to the next standalone message.
+    """
+    if len(conversation) <= _MAX_CONVERSATION_MESSAGES:
+        return conversation
+    trimmed = conversation[-_MAX_CONVERSATION_MESSAGES:]
+    start = 0
+    while start < len(trimmed) and isinstance(trimmed[start], ToolMessage):
+        start += 1
+    return trimmed[start:]
+
+
+def _collected_details_note(booking_state: Any) -> str:
+    """Tell the model which booking details the code already captured.
+
+    The model sometimes re-asks for details it was given earlier. The code-side
+    BookingState is the source of truth, so state it explicitly every turn.
+    """
+    collected = [
+        label for label, attr in _BOOKING_DETAIL_FLAGS
+        if getattr(booking_state, attr, False)
+    ]
+    if not collected:
+        return ""
+    note = (
+        "Already collected from the caller (never ask for these again): "
+        + ", ".join(collected) + "."
+    )
+    try:
+        next_item = booking_state.first_missing_information()
+    except Exception:
+        next_item = None
+    if next_item:
+        note += f" Ask only for this next: {next_item}."
+    return note
+
+
 def messages_for_agent(
     role: AgentRole,
     conversation: list[BaseMessage],
@@ -138,6 +206,7 @@ def messages_for_agent(
     tool_errors: dict[str, str] | None = None,
     tools_used: dict[str, int] | None = None,
     max_tool_rounds: int = 0,
+    booking_state: Any | None = None,
 ) -> list[BaseMessage]:
     """Build the agent's scoped context, including its task and allowed tools."""
     settings = get_settings()
@@ -162,8 +231,12 @@ def messages_for_agent(
                 f"Today is {now:%A, %B %d, %Y} ({now:%Y-%m-%d}). Resolve relative dates from this."
             )
         ),
-        *conversation,
+        *_trim_conversation(conversation),
     ]
+    if booking_state is not None and role.name == "appointments":
+        note = _collected_details_note(booking_state)
+        if note:
+            messages.append(SystemMessage(content=note))
     for name, error in (tool_errors or {}).items():
         messages.append(
             SystemMessage(

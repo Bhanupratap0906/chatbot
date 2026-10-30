@@ -12,17 +12,20 @@ that need to customize a session.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from modules.common.call_context import set_call_id
 from modules.common.settings import get_settings
 from modules.portal.cookie_header_parser import extract_token_from_cookie_header
 from modules.portal.session import extract_location_id_from_jwt
-from modules.portal.token_store import portal_token_store
 from modules.realtime.realtime_voice_session import RealtimeVoiceSession
 from modules.stt.deepgram_realtime_connector import DeepgramRealtimeConnector
+from modules.workflow.conversation_workflow_graph import release_thread
 from modules.tts.voice_catalog import SAMPLE_RATE as TTS_SAMPLE_RATE
 from modules.tts.voice_catalog import VOICES
 
@@ -30,6 +33,79 @@ logger = logging.getLogger("voice")
 
 
 router = APIRouter(tags=["Realtime"])
+
+# Small grace period after ``ready`` so the browser can start its audio
+# playback pipeline before the first greeting audio arrives.
+GREETING_START_DELAY_SECONDS = 0.3
+
+
+# ---------- per-IP concurrent connection limit ----------
+
+_active_connections: dict[str, int] = {}
+_connections_lock: Optional[asyncio.Lock] = None
+
+
+def _get_connections_lock() -> asyncio.Lock:
+    global _connections_lock
+    if _connections_lock is None:
+        _connections_lock = asyncio.Lock()
+    return _connections_lock
+
+
+async def _acquire_connection_slot(ip: str, limit: int) -> bool:
+    async with _get_connections_lock():
+        if _active_connections.get(ip, 0) >= limit:
+            return False
+        _active_connections[ip] = _active_connections.get(ip, 0) + 1
+        return True
+
+
+async def _release_connection_slot(ip: str) -> None:
+    async with _get_connections_lock():
+        if ip in _active_connections:
+            _active_connections[ip] -= 1
+            if _active_connections[ip] <= 0:
+                del _active_connections[ip]
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    try:
+        exc = task.exception()
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        return
+    if exc is not None:
+        logger.warning("send_configured_greeting failed: %r", exc, exc_info=exc)
+
+
+def _origin_allowed(origin: Optional[str], allowed: list[str]) -> bool:
+    if "*" in allowed:
+        return True
+    if origin is None:
+        return True
+    return origin in allowed
+
+
+def _token_looks_valid(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    return len(token.split(".")) == 3
+
+
+async def _run_greeting(session: RealtimeVoiceSession) -> None:
+    """Run the first greeting after a short delay.
+
+    ``start_configured_greeting`` may return a Task, a coroutine, or None
+    (if it schedules work internally); all three are handled here so the
+    caller always gets a real ``asyncio.Task`` to supervise.
+    """
+    await asyncio.sleep(GREETING_START_DELAY_SECONDS)
+    start_greeting = getattr(session, "start_configured_greeting", None)
+    if start_greeting is None:
+        await session.send_configured_greeting()
+        return
+    result = start_greeting()
+    if inspect.isawaitable(result):
+        await result
 
 
 async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSession) -> None:
@@ -49,9 +125,13 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
     ]
     # Runs once and finishes on its own — must not be in the FIRST_COMPLETED
     # race below, or the session tears down the instant the greeting ends.
-    asyncio.create_task(session.send_configured_greeting())
+    greeting_task = asyncio.create_task(_run_greeting(session))
+    greeting_task.add_done_callback(_log_task_exception)
+    settings = session._settings
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            tasks, return_when=asyncio.FIRST_COMPLETED, timeout=settings.max_call_seconds
+        )
         for task in pending:
             task.cancel()
         for task in done:
@@ -59,16 +139,31 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
             if exc and not isinstance(exc, WebSocketDisconnect):
                 logger.warning("session ended: %r", exc)
     finally:
+        greeting_task.cancel()
+        await asyncio.gather(greeting_task, return_exceptions=True)
+        stop_background_tasks = getattr(session, "stop_background_tasks", None)
+        if stop_background_tasks is not None:
+            await stop_background_tasks()
         turn = session.turn
         if turn and not turn.done():
             turn.cancel()
+            await asyncio.gather(turn, return_exceptions=True)
         try:
             await dg.send(json.dumps({"type": "CloseStream"}))
         except Exception:
             pass
-        await dg.close()
+        try:
+            await dg.close()
+        except asyncio.CancelledError:
+            pass  # loop already cancelling (e.g. Ctrl+C teardown)
+        except Exception as exc:
+            logger.warning("deepgram close failed: %r", exc)
         try:
             await ws.close()
+        except Exception:
+            pass
+        try:
+            release_thread(session.session_id)
         except Exception:
             pass
         session.costs.print_summary()
@@ -78,20 +173,33 @@ async def _run_voice_session_pumps(ws: WebSocket, dg, session: RealtimeVoiceSess
 @router.websocket("/ws/voice")
 async def handle_voice_websocket_connection(ws: WebSocket):
     """Handle a frontend live-call connection; FastAPI invokes this for ``/ws/voice``."""
-    await ws.accept()
     settings = get_settings()
+    set_call_id()
 
-    # The browser ships cookies on the WS handshake: pull the portal token
-    # from the chatbot cookie so booking tools can authenticate even when
-    # this process never saw the login HTTP request (e.g. after restart).
+    # --- pre-accept checks (close with 1008 before accept) ---
+    origin = ws.headers.get("origin")
+    if not _origin_allowed(origin, settings.allowed_origins):
+        await ws.close(code=1008, reason="Origin not allowed")
+        return
+
     ws_token = extract_token_from_cookie_header(
         ws.headers.get("cookie"), settings.portal_cookie_name
     )
-    if ws_token:
-        portal_token_store.set(ws_token, location_id=extract_location_id_from_jwt(ws_token))
+    if not _token_looks_valid(ws_token):
+        await ws.close(code=1008, reason="Missing or invalid portal cookie")
+        return
+
+    client_ip = ws.client.host if ws.client else "unknown"
+    slot_acquired = await _acquire_connection_slot(client_ip, settings.max_concurrent_calls_per_ip)
+    if not slot_acquired:
+        await ws.close(code=1008, reason="Too many concurrent calls from this IP")
+        return
+
+    await ws.accept()
 
     if not settings.deepgram_api_key:
         await ws.close(code=1011, reason="DEEPGRAM_API_KEY is not configured")
+        await _release_connection_slot(client_ip)
         return
 
     try:
@@ -102,12 +210,23 @@ async def handle_voice_websocket_connection(ws: WebSocket):
     except Exception as error:
         logger.error("failed to connect to Deepgram: %r", error)
         await ws.close(code=1011, reason="Failed to connect to speech-to-text service")
+        await _release_connection_slot(client_ip)
         return
 
     # DIP: session builds its default LLM/TTS internally, but they are
     # injectable — see ``RealtimeVoiceSession(ws, dg, llm=..., tts=...)``.
-    session = RealtimeVoiceSession(ws, dg, voice=settings.default_voice, settings=settings)
-    await _run_voice_session_pumps(ws, dg, session)
+    session = RealtimeVoiceSession(
+        ws,
+        dg,
+        voice=settings.default_voice,
+        settings=settings,
+        portal_token=ws_token,
+        portal_location_id=extract_location_id_from_jwt(ws_token) if ws_token else None,
+    )
+    try:
+        await _run_voice_session_pumps(ws, dg, session)
+    finally:
+        await _release_connection_slot(client_ip)
 
 
 __all__ = ["router", "handle_voice_websocket_connection", "RealtimeVoiceSession"]

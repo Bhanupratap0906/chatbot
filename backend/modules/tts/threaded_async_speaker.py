@@ -9,11 +9,15 @@ class never changes when voices or providers change (OCP).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 from collections.abc import Callable, Iterable
 
 logger = logging.getLogger("tts")
+
+_TTS_TIMEOUT = 30.0
+
 
 class ThreadedTextToSpeechSpeaker:
     """Stream blocking audio generation without blocking the asyncio event loop."""
@@ -32,23 +36,32 @@ class ThreadedTextToSpeechSpeaker:
 
         def produce():
             """Generate chunks on the worker and safely enqueue chunks/errors for asyncio."""
+            ctx = contextvars.copy_context()
             try:
-                for chunk in self._chunk_factory(text, voice):
-                    if stop.is_set():
-                        break
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                def _run_in_context():
+                    for chunk in self._chunk_factory(text, voice):
+                        if stop.is_set():
+                            break
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                ctx.run(_run_in_context)
             except Exception as error:
                 loop.call_soon_threadsafe(queue.put_nowait, error)
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        threading.Thread(target=produce, daemon=True).start()
+        thread = threading.Thread(target=produce, daemon=True)
+        thread.start()
 
         first = True
         sent = 0
         try:
             while True:
-                chunk = await queue.get()
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=_TTS_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning("tts timed out for %r", text)
+                    stop.set()
+                    break
                 if chunk is None:
                     break
                 if isinstance(chunk, Exception):
@@ -60,7 +73,11 @@ class ThreadedTextToSpeechSpeaker:
                 if chunk:
                     sent += len(chunk)
                     await send_bytes(chunk)
-            if sent == 0:
+            if sent == 0 and not stop.is_set():
                 logger.warning("no audio returned for %r", text)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
         finally:
             stop.set()
+            thread.join(timeout=1.0)

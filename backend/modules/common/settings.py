@@ -26,6 +26,14 @@ def _load_env_once() -> None:
 _load_env_once()
 
 
+def _require_env(name: str) -> str:
+    """Fail fast when a required environment variable is missing."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
 def _as_bool(value: str | None, default: bool = False) -> bool:
     """Interpret common environment values as booleans when settings are created."""
     if value is None:
@@ -38,8 +46,10 @@ class Settings:
     """All tunable knobs for the voice pipeline."""
 
     deepgram_api_key: str = field(default_factory=lambda: os.getenv("DEEPGRAM_API_KEY", ""))
+
     groq_api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
     groq_model: str = field(default_factory=lambda: os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"))
+    groq_fallback_model: str = field(default_factory=lambda: os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant"))
     groq_input_price_per_million: float = field(
         default_factory=lambda: float(os.getenv("GROQ_INPUT_PRICE_PER_MILLION", "0.075"))
     )
@@ -61,8 +71,10 @@ class Settings:
 
     barge_in: bool = field(default_factory=lambda: _as_bool(os.getenv("BARGE_IN"), False))
     llm_timeout: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT", "20")))
-    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "512")))
-    llm_max_retries: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "2")))
+    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "200")))
+    # Voice callers should get an immediate fallback instead of waiting through
+    # a provider Retry-After delay that can exceed the turn timeout.
+    llm_max_retries: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "0")))
 
     default_voice: str = field(default_factory=lambda: os.getenv("DEFAULT_VOICE", "flux-hannah-en"))
     greeting_text: str = field(
@@ -73,14 +85,14 @@ class Settings:
     )
     history_window: int = field(default_factory=lambda: int(os.getenv("HISTORY_WINDOW", "8")))
     clinic_timezone: str = field(default_factory=lambda: os.getenv("CLINIC_TIMEZONE", "Asia/Kolkata"))
-    no_answer_timeout: float = field(default_factory=lambda: float(os.getenv("NO_ANSWER_TIMEOUT", "10")))
+    no_answer_timeout: float = field(default_factory=lambda: float(os.getenv("NO_ANSWER_TIMEOUT", "20")))
 
     # Customer portal (Daily) API — login page hands credentials to the
     # backend, which exchanges them for the portal JWT and mirrors it into
     # a chatbot-domain cookie (see modules/portal/). The active locationId
     # is read from the JWT session (modules/portal/session.py); the
     # PORTAL_LOCATION_ID below is only a last-resort override.
-    portal_base_build_portal_url: str = field(
+    portal_base_url: str = field(
         default_factory=lambda: os.getenv("PORTAL_BASE_URL", "http://localhost:50001/api")
     )
     portal_timeout: float = field(default_factory=lambda: float(os.getenv("PORTAL_TIMEOUT", "15")))
@@ -93,11 +105,43 @@ class Settings:
     portal_location_id: str = field(
         default_factory=lambda: os.getenv("PORTAL_LOCATION_ID", "")
     )
+    # SIP gateway credentials (server-side only; served via /api/sip/credentials).
+    sip_ws_url: str = field(default_factory=lambda: os.getenv("SIP_WS_URL", os.getenv("NEXT_PUBLIC_SIP_WS", "")))
+    sip_domain: str = field(default_factory=lambda: os.getenv("SIP_DOMAIN", os.getenv("NEXT_PUBLIC_SIPDOMAIN", "")))
+    sip_username: str = field(default_factory=lambda: os.getenv("SIP_USERNAME", os.getenv("NEXT_PUBLIC_SIPUSERNAME", "")))
+    sip_password: str = field(default_factory=lambda: os.getenv("SIP_PASSWORD", os.getenv("NEXT_PUBLIC_SIPPASSWORD", "")))
+    portal_location_encryption_key: str = field(
+        default_factory=lambda: os.getenv("PORTAL_LOCATION_ENCRYPTION_KEY", "")
+    )
     portal_appointment_duration_minutes: int = field(
         default_factory=lambda: int(os.getenv("PORTAL_APPOINTMENT_DURATION_MINUTES", "30"))
     )
     api_log_bodies: bool = field(
-        default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), True)
+        default_factory=lambda: _as_bool(os.getenv("API_LOG_BODIES"), False)
+    )
+    langsmith_tracing: bool = field(
+        default_factory=lambda: _as_bool(os.getenv("LANGSMITH_TRACING"), False)
+    )
+    langsmith_api_key: str = field(
+        default_factory=lambda: os.getenv("LANGSMITH_API_KEY", "")
+    )
+    langsmith_project: str = field(
+        default_factory=lambda: os.getenv("LANGSMITH_PROJECT", "voice-dental-clinic")
+    )
+    cookie_secure: bool = field(
+        default_factory=lambda: _as_bool(os.getenv("COOKIE_SECURE"), True)
+    )
+    cookie_samesite: str = field(
+        default_factory=lambda: os.getenv("COOKIE_SAMESITE", "lax")
+    )
+    allowed_origins: list[str] = field(
+        default_factory=lambda: [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+    )
+    max_call_seconds: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CALL_SECONDS", "600"))
+    )
+    max_concurrent_calls_per_ip: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CONCURRENT_CALLS_PER_IP", "5"))
     )
 
 

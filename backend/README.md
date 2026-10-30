@@ -37,7 +37,7 @@ sequenceDiagram
         Controller-->>Browser: Close with code 1011
     else API key configured
         Controller->>DG: DeepgramRealtimeConnector.connect()
-        Note over Controller,DG: connect() builds URL with build_listen_build_portal_url()
+        Note over Controller,DG: connect() builds URL with build_listen_url()
         alt Deepgram connection fails
             Controller-->>Browser: Close with code 1011
         else Connected
@@ -166,7 +166,7 @@ flowchart TD
     Key -- No --> CloseConfig[ws.close code 1011: key missing]
     Key -- Yes --> Connector[DeepgramRealtimeConnector]
     Connector --> Connect[connect]
-    Connect --> URL[build_listen_build_portal_url input sample rate]
+    Connect --> URL[build_listen_url input sample rate]
     URL --> DeepgramConnect{Deepgram websocket connects?}
     DeepgramConnect -- No --> LogConnect[Log connection failure]
     LogConnect --> CloseConnect[ws.close code 1011: STT connection failed]
@@ -428,7 +428,7 @@ No module uses `print()`; `scripts/` CLI diagnostics are the only prints.
 ## Speech recognition (STT)
 
 - `modules/stt/connector.py`
-  - `build_listen_build_portal_url()` builds the Deepgram streaming URL and is used by
+  - `build_listen_url()` builds the Deepgram streaming URL and is used by
     `DeepgramRealtimeConnector.connect()`.
   - `DeepgramRealtimeConnector.connect()` establishes the streaming connection
     used by `voice_socket()`.

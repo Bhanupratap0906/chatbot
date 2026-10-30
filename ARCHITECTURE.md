@@ -20,7 +20,11 @@ backend/
     │   ├── sentence_chunk_splitter.py                      Sentence-aware splitter for streaming TTS
     │   ├── llm_error_classification.py                        Tool validation error classifier
     │   ├── prompt_injection_guardrail.py                    Regex prompt-injection guardrail
-    │   ├── groq_llm_assistant.py                   Groq LLM assistant (GroqLlmAssistant) + system prompt
+    │   ├── redact.py                                           PII redaction helper
+    │   ├── emergency.py                                        Deterministic emergency triage
+    │   ├── call_context.py                                      call_id ContextVar + JSON logging
+    │   ├── tracing.py                                           Optional LangSmith tracing
+    │   └── usage_capturing_async_client.py                       Groq usage-capturing async client
     │   └── llm_tool_call_executor.py                 Dispatches model tool calls + booking validation
     ├── portal/
     │   ├── appointments_router.py           /api/appointments proxies
@@ -31,7 +35,9 @@ backend/
     │   ├── dtos.py                          Portal request DTOs/enums/validators
     │   ├── errors.py                        PortalApiError/Auth/Network types
     │   ├── session.py                       JWT location resolution + slot location encryption
-    │   └── token_store.py                   Process-wide portal JWT/location holder
+    │   └── token_store.py                   Per-session portal JWT/location holder (ContextVar)
+    ├── sip/
+    │   └── sip_credentials_router.py            Authenticated /api/sip/credentials endpoint
     ├── realtime/
     │   ├── greeting_service.py                      One-shot welcome message service
     │   ├── conversation_history.py                       Bounded in-memory conversation history
@@ -74,7 +80,7 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 - **Purpose**: Accumulate per-session STT/TTS/LLM usage and estimated cost.
 - **Public**: `ConversationCostTracker(settings: Settings)`; `add_stt_audio(byte_count: int, sample_rate: int) -> None`; `add_tts_text(text: str, model: str) -> None`; `add_llm_usage(usage: Mapping, model: str) -> None`; `print_summary() -> None`.
 - **Project imports**: `modules.common.settings.Settings`.
-- **Used by**: `modules.realtime.realtime_voice_session.RealtimeVoiceSession`; `modules.llm.groq_llm_assistant.GroqLlmAssistant` (optional); `modules.tts.deepgram_audio_generator.DeepgramAudioGenerator`; `modules.tts.text_to_speech_service.TextToSpeechService` (passes tracker); `modules.workflow.conversation_workflow_graph.ConversationWorkflow`.
+- **Used by**: `modules.realtime.realtime_voice_session.RealtimeVoiceSession`; ``modules.tts.deepgram_audio_generator.DeepgramAudioGenerator`; `modules.tts.text_to_speech_service.TextToSpeechService` (passes tracker); `modules.workflow.conversation_workflow_graph.ConversationWorkflow`.
 - **External/config**: prices in `Settings` (Groq input/cached/output, Deepgram STT per minute, TTS per 1000 chars).
 
 ### `modules/common/backend_contracts.py`
@@ -106,7 +112,7 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 - **Purpose**: Classify Groq tool-call validation failures.
 - **Public**: `is_tool_validation_error(error: Exception) -> bool`.
 - **Project imports**: none.
-- **Used by**: `modules.llm.groq_llm_assistant.GroqLlmAssistant.stream_conversation_turn`; `modules.workflow.conversation_workflow_graph.ConversationWorkflow._generate_agent_response`.
+- **Used by**: ``modules.workflow.conversation_workflow_graph.ConversationWorkflow._respond`.
 - **External/config**: none.
 
 ### `modules/llm/prompt_injection_guardrail.py`
@@ -114,10 +120,9 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 - **Purpose**: Regex prompt-injection guardrail.
 - **Public**: `INJECTION_PATTERNS: list[str]`; `RegexInjectionGuardrail(patterns=None)`; `is_injection(user_message: str) -> bool`; `is_allowed(text: str) -> bool`.
 - **Project imports**: `modules.common.backend_contracts.Guardrail`.
-- **Used by**: `modules.llm.groq_llm_assistant.GroqLlmAssistant`; `modules.workflow.conversation_workflow_graph.ConversationWorkflow`.
+- **Used by**: ``modules.workflow.conversation_workflow_graph.ConversationWorkflow`.
 - **External/config**: none.
 
-### `modules/llm/groq_llm_assistant.py`
 
 - **Purpose**: Groq LLM assistant implementing `LlmAssistant` (guardrail -> tool stream_conversation_turn -> final stream_conversation_turn); currently not instantiated by runtime (see known issues).
 - **Public**: constants `SYSTEM_PROMPT`, `OUT_OF_SCOPE_REPLY`; `_normalize_message_content_to_text(content) -> str`; `_stream_plain_llm_response(llm, messages, **kwargs)` async generator; `_UsageCapturingAsyncClient`; `GroqLlmAssistant.__init__(model=None, llm=None, guardrail=None, tool_executor=None, system_prompt=SYSTEM_PROMPT, cost_tracker=None)`; `_messages(text, history=None) -> list`; `stream_conversation_turn(text, history=None) -> AsyncIterator[str]`.
@@ -130,7 +135,7 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 - **Purpose**: Execute model-requested tools; special-case booking validation.
 - **Public**: `LlmToolCallExecutor(tools=None)`; property `tools -> list`; `execute_tool_calls(response, messages) -> None`; `_validate_and_execute_booking(tool_call, tool_args, messages) -> None`.
 - **Project imports**: lazy `modules.tools.TOOL_REGISTRY`.
-- **Used by**: `modules.llm.groq_llm_assistant.GroqLlmAssistant`; `modules.workflow.conversation_workflow_graph.ConversationWorkflow`.
+- **Used by**: ``modules.workflow.conversation_workflow_graph.ConversationWorkflow`.
 - **External/config**: none.
 
 ### `modules/portal/appointments_router.py`
@@ -160,7 +165,7 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 ### `modules/portal/cookie_header_parser.py`
 
 - **Purpose**: Parse raw Cookie header.
-- **Public**: `extract_extract_token_from_cookie_header(header, cookie_name) -> Optional[str]`.
+- **Public**: `extract_token_from_cookie_header(header, cookie_name) -> Optional[str]`.
 - **Project imports**: none.
 - **Used by**: `modules.realtime.voice_websocket_controller.handle_voice_websocket_connection`.
 - **External/config**: none.
@@ -344,7 +349,7 @@ Empty package `__init__.py` files (`common/`, `portal/`) are omitted above; they
 ### `modules/workflow/conversation_workflow_graph.py`
 
 - **Purpose**: LangGraph conversation workflow, tool loop, hangup, checkpointing.
-- **Public**: `escalate_to_human` tool; `WorkflowState`; `ConversationWorkflow(...)`; `bind_to_conversation_thread`; `_generate_agent_response`, `_execute_requested_tools`, `_finalize_turn_response`, `_tool_limit`, `_route_after_agent_response`; `stream_conversation_turn(text, history=None)` async generator; `_get_or_create_thread_checkpointer`.
+- **Public**: `escalate_to_human` tool; `WorkflowState`; `ConversationWorkflow(...)`; `bind_to_conversation_thread`; `_respond`, `_tools`, `_record_turn`, `_tool_limit`, `_route_after_response`; `stream_conversation_turn(text, history=None)` async generator; `_get_or_create_thread_checkpointer`.
 - **Project imports**: `modules.common.conversation_cost_tracker`, `modules.common.settings`, `modules.llm.llm_error_classification`, `modules.llm.prompt_injection_guardrail`, `modules.tools`, `modules.llm.llm_tool_call_executor`, `modules.workflow.conversation_agents`.
 - **Used by**: `modules.realtime.realtime_voice_session.RealtimeVoiceSession`.
 - **External/config**: `GROQ_MODEL`, `LLM_MAX_TOKENS`; LangGraph `InMemorySaver`.
@@ -367,7 +372,7 @@ sequenceDiagram
     M->>VC: include_router(voice_router)
     Note over VC: client opens /ws/voice
     VC->>VC: handle_voice_websocket_connection(ws)
-    VC->>VC: extract_extract_token_from_cookie_header(...)
+    VC->>VC: extract_token_from_cookie_header(...)
     VC->>VC: portal_token_store.set(...)
     VC->>STT: DeepgramRealtimeConnector(...).connect_to_deepgram_realtime()
     VC->>VS: RealtimeVoiceSession(ws, dg, voice=..., settings=...)
@@ -398,14 +403,14 @@ sequenceDiagram
     VS->>TM: AssistantTurnManager.start_assistant_turn(text)
     TM->>TM: run_assistant_turn(text)
     TM->>WF: stream_conversation_turn(text, history.snapshot())
-    WF->>WF: _generate_agent_response -> _route_after_agent_response
+    WF->>WF: _respond -> _route_after_response
     alt tool calls
-        WF->>WF: _execute_requested_tools
+        WF->>WF: _tools
         WF->>TE: LlmToolCallExecutor.execute_tool_calls(response, messages)
         TE->>T: tool.ainvoke(args)
         T-->>TE: result string
         TE-->>WF: ToolMessage appended
-        WF->>WF: _generate_agent_response (final)
+        WF->>WF: _respond (final)
     end
     WF-->>TM: yield text pieces
     TM->>TM: _sanitize_text_for_speech(piece)
@@ -414,7 +419,7 @@ sequenceDiagram
     TM->>VS: history.replace_snapshot(workflow.history_messages)
 ```
 
-Exact path: `realtime/realtime_voice_session.py:RealtimeVoiceSession.pump_deepgram_events_to_turns` -> `RealtimeVoiceSession.start_assistant_turn_from_buffer` -> `PendingTranscriptBuffer.take_pending_transcript` -> `AssistantTurnManager.start_assistant_turn` -> `AssistantTurnManager.run_assistant_turn` -> `workflow/conversation_workflow_graph.py:ConversationWorkflow.stream_conversation_turn` -> `ConversationWorkflow._generate_agent_response` -> `ConversationWorkflow._route_after_agent_response` -> (if tools) `ConversationWorkflow._execute_requested_tools` -> `llm/llm_tool_call_executor.py:LlmToolCallExecutor.execute_tool_calls` -> tool function (e.g. `tools/portal_lookup_tools.py:find_available_slots` or `tools/appointment_booking_tool.py:book_appointment`) -> `ConversationWorkflow._generate_agent_response` -> `ConversationWorkflow._finalize_turn_response`. Then `realtime/realtime_voice_session.py:AssistantTurnManager.run_assistant_turn` -> `llm/sentence_chunk_splitter.py:SentenceChunkSplitter.split` -> `tts/text_to_speech_service.py:TextToSpeechService.speak` -> `tts/threaded_async_speaker.py:ThreadedTextToSpeechSpeaker.speak` -> `tts/deepgram_audio_generator.py:DeepgramAudioGenerator.generate_audio_chunks`.
+Exact path: `realtime/realtime_voice_session.py:RealtimeVoiceSession.pump_deepgram_events_to_turns` -> `RealtimeVoiceSession.start_assistant_turn_from_buffer` -> `PendingTranscriptBuffer.take_pending_transcript` -> `AssistantTurnManager.start_assistant_turn` -> `AssistantTurnManager.run_assistant_turn` -> `workflow/conversation_workflow_graph.py:ConversationWorkflow.stream_conversation_turn` -> `ConversationWorkflow._respond` -> `ConversationWorkflow._route_after_response` -> (if tools) `ConversationWorkflow._tools` -> `llm/llm_tool_call_executor.py:LlmToolCallExecutor.execute_tool_calls` -> tool function (e.g. `tools/portal_lookup_tools.py:find_available_slots` or `tools/appointment_booking_tool.py:book_appointment`) -> `ConversationWorkflow._respond` -> `ConversationWorkflow._record_turn`. Then `realtime/realtime_voice_session.py:AssistantTurnManager.run_assistant_turn` -> `llm/sentence_chunk_splitter.py:SentenceChunkSplitter.split` -> `tts/text_to_speech_service.py:TextToSpeechService.speak` -> `tts/threaded_async_speaker.py:ThreadedTextToSpeechSpeaker.speak` -> `tts/deepgram_audio_generator.py:DeepgramAudioGenerator.generate_audio_chunks`.
 
 ### 4c. Barge-in / turn cancellation
 
@@ -446,12 +451,12 @@ sequenceDiagram
     BA-->>TE: result
 ```
 
-Exact path: `workflow/conversation_workflow_graph.py:ConversationWorkflow._execute_requested_tools` (validates readback/confirmation) -> `llm/llm_tool_call_executor.py:LlmToolCallExecutor.execute_tool_calls` -> `llm/llm_tool_call_executor.py:LlmToolCallExecutor._validate_and_execute_booking` (validates required args/confirmation) -> `tools/appointment_booking_tool.py:book_appointment` -> `tools/appointment_booking_tool.py:_default_appointment_booking_handler` (`create_appointment_booking_handler` result) -> `tools/portal_appointment_booking_repository.py:PortalAppointmentBookingRepository.book` -> `PortalAppointmentBookingRepository._find_patient_by_mobile_number` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_patient_list_data`/`create_patient`; `portal/session.py:resolve_active_location_id`; `PortalAppointmentBookingRepository._resolve_service_id_from_patient_problem` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_procedure_master_list`; `PortalAppointmentBookingRepository._resolve_provider_id_for_service`/`_resolve_operatory_id_for_service` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_appointment_master_data`; `_fetch_available_slot_times` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_appointment_slots`; `_parse_appointment_start_and_end`; `_build_appointment_booking_payload` -> `portal/portal_http_client.py:CustomerPortalHttpClient.book_appointment` (`POST /appointments/appointmentBook`).
+Exact path: `workflow/conversation_workflow_graph.py:ConversationWorkflow._tools` (validates readback/confirmation) -> `llm/llm_tool_call_executor.py:LlmToolCallExecutor.execute_tool_calls` -> `llm/llm_tool_call_executor.py:LlmToolCallExecutor._validate_and_execute_booking` (validates required args/confirmation) -> `tools/appointment_booking_tool.py:book_appointment` -> `tools/appointment_booking_tool.py:_default_appointment_booking_handler` (`create_appointment_booking_handler` result) -> `tools/portal_appointment_booking_repository.py:PortalAppointmentBookingRepository.book` -> `PortalAppointmentBookingRepository._find_patient_by_mobile_number` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_patient_list_data`/`create_patient`; `portal/session.py:resolve_active_location_id`; `PortalAppointmentBookingRepository._resolve_service_id_from_patient_problem` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_procedure_master_list`; `PortalAppointmentBookingRepository._resolve_provider_id_for_service`/`_resolve_operatory_id_for_service` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_appointment_master_data`; `_fetch_available_slot_times` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_appointment_slots`; `_parse_appointment_start_and_end`; `_build_appointment_booking_payload` -> `portal/portal_http_client.py:CustomerPortalHttpClient.book_appointment` (`POST /appointments/appointmentBook`).
 
 ### 4e. Hangup
 
-- Model calls `escalate_to_human`: `workflow/conversation_workflow_graph.py:ConversationWorkflow._execute_requested_tools` sets `_current_turn_hangup`, `hangup_requested`, workflow `human_handoff="hangup"`, returns `ToolMessage(content="HANGUP_CALL")`.
-- `workflow/conversation_workflow_graph.py:ConversationWorkflow._finalize_turn_response` returns `response_text="HANGUP_CALL"` (when handoff hangup).
+- Model calls `escalate_to_human`: `workflow/conversation_workflow_graph.py:ConversationWorkflow._tools` sets `_current_turn_hangup`, `hangup_requested`, workflow `human_handoff="hangup"`, returns `ToolMessage(content="HANGUP_CALL")`.
+- `workflow/conversation_workflow_graph.py:ConversationWorkflow._record_turn` returns `response_text="HANGUP_CALL"` (when handoff hangup).
 - `realtime/realtime_voice_session.py:AssistantTurnManager.run_assistant_turn` sees `piece == "HANGUP_CALL"`, sets `self._hangup=True`, `workflow.hangup_requested=True`, speaks goodbye, sends `{"type":"hangup"}`, closes websocket/Deepgram.
 
 ### 4f. Portal auth
@@ -459,7 +464,7 @@ Exact path: `workflow/conversation_workflow_graph.py:ConversationWorkflow._execu
 - Login: `portal/auth_router.py:login` -> `portal/portal_http_client.py:CustomerPortalHttpClient.login` -> `portal/token_store.py:portal_token_store.set` + `portal/session.py:extract_location_id_from_jwt` -> `portal/auth_router.py:_set_portal_cookie`.
 - Logout: `portal/auth_router.py:logout` -> `portal/portal_http_client.py:CustomerPortalHttpClient.request(POST /admin/auth/logout)` -> `portal/token_store.py:portal_token_store.clear` + delete cookie.
 - Me: `portal/auth_router.py:me` -> `portal/portal_token_dependency.py:resolve_portal_token_from_request` -> `portal/portal_http_client.py:CustomerPortalHttpClient.get_token_details` -> `portal/token_store.py:portal_token_store.set_location`.
-- WS handshake: `voice_websocket_controller.py:handle_voice_websocket_connection` -> `portal/cookie_header_parser.py:extract_extract_token_from_cookie_header` -> `portal/token_store.py:portal_token_store.set`.
+- WS handshake: `voice_websocket_controller.py:handle_voice_websocket_connection` -> `portal/cookie_header_parser.py:extract_token_from_cookie_header` -> `portal/token_store.py:portal_token_store.set`.
 - Tools: `portal/session.py:resolve_active_location_id` (store -> JWT claim -> token details -> env).
 
 ### 4g. Cost tracking
@@ -467,7 +472,7 @@ Exact path: `workflow/conversation_workflow_graph.py:ConversationWorkflow._execu
 - `realtime/realtime_voice_session.py:RealtimeVoiceSession.__init__` creates `ConversationCostTracker`.
 - STT: `RealtimeVoiceSession.pump_browser_audio_to_deepgram` -> `costs.add_stt_audio`.
 - TTS: `tts/deepgram_audio_generator.py:DeepgramAudioGenerator.generate_audio_chunks` -> `costs.add_tts_text`.
-- LLM: `workflow/conversation_workflow_graph.py:ConversationWorkflow.__init__` wraps `ChatGroq.async_client` with `llm/groq_llm_assistant.py:_UsageCapturingAsyncClient`, whose `create` calls `costs.add_llm_usage`.
+- LLM: `workflow/conversation_workflow_graph.py:ConversationWorkflow.__init__` wraps `ChatGroq.async_client` with `common/usage_capturing_async_client.py:_UsageCapturingAsyncClient`, whose `create` calls `costs.add_llm_usage`.
 - End: `voice_websocket_controller.py:_run_voice_session_pumps` finally -> `costs.print_summary`.
 
 ### 4h. History
@@ -502,7 +507,7 @@ flowchart TD
     WF --> TE[llm/llm_tool_call_executor.py]
     WF --> Guard[llm/prompt_injection_guardrail.py]
     WF --> Tools[tools/*]
-    WF --> LLMsvc[llm/groq_llm_assistant.py]
+    WF --> LLMsvc[common/usage_capturing_async_client.py]
     TE --> Registry[tools/tool_registry.py]
     Tools --> Repo[tools/portal_appointment_booking_repository.py]
     Tools --> PortalTools[tools/portal_lookup_tools.py]
@@ -536,7 +541,7 @@ stateDiagram-v2
     record_turn --> [*]
 ```
 
-Node conditions: `respond` selects agent, filters tools, invokes LLM. `_route_after_agent_response` returns `"tools"` if last AI message has `tool_calls`, else `"done"` -> `record_turn`. `tools` validates/handles escalate, unauthorized tools, duplicate/limit guards, booking confirmation guard, then executes. `record_turn` returns `HANGUP_CALL` if `workflow.human_handoff == "hangup"`, otherwise last AI text. Note `_tool_limit` exists but is not wired into the compiled graph.
+Node conditions: `respond` selects agent, filters tools, invokes LLM. `_route_after_response` returns `"tools"` if last AI message has `tool_calls`, else `"done"` -> `record_turn`. `tools` validates/handles escalate, unauthorized tools, duplicate/limit guards, booking confirmation guard, then executes. `record_turn` returns `HANGUP_CALL` if `workflow.human_handoff == "hangup"`, otherwise last AI text. Note `_tool_limit` exists but is not wired into the compiled graph.
 
 ### Class diagram (selected)
 
@@ -602,15 +607,15 @@ classDiagram
 | Field | Type | Set/Read/Reset |
 |---|---|---|
 | `messages` | `Annotated[list[BaseMessage], add_messages]` | seeded in `ConversationWorkflow.stream_conversation_turn`; appended by nodes; checkpointed |
-| `turn_text` | `str` | set per turn in `stream_conversation_turn`; read in `_execute_requested_tools` for confirmation/affirmative checks |
+| `turn_text` | `str` | set per turn in `stream_conversation_turn`; read in `_tools` for confirmation/affirmative checks |
 | `turn_id` | `int` | incremented in `stream_conversation_turn`; used to distinguish current turn state |
-| `response_text` | `str` | set in `_finalize_turn_response` (HANGUP_CALL or last AI) |
+| `response_text` | `str` | set in `_record_turn` (HANGUP_CALL or last AI) |
 | `workflow` | `dict[str, Any]` | passed/merged in `stream_conversation_turn`; stores assigned_agent, human_handoff, handoff_reason |
-| `tool_calls_by_name` | `dict[str,int]` | updated in `_execute_requested_tools`; checkpointed |
-| `tool_errors` | `dict[str,str]` | updated in `_execute_requested_tools`; read in `_generate_agent_response` |
-| `max_tool_rounds` | `int` | incremented in `_execute_requested_tools`; read in `_generate_agent_response` |
-| `assigned_agent` | `str` | set in `_generate_agent_response`; read in `_execute_requested_tools`/stream_conversation_turn |
-| `handoff_requested` | `bool` | set in `_execute_requested_tools` on escalate |
+| `tool_calls_by_name` | `dict[str,int]` | updated in `_tools`; checkpointed |
+| `tool_errors` | `dict[str,str]` | updated in `_tools`; read in `_respond` |
+| `max_tool_rounds` | `int` | incremented in `_tools`; read in `_respond` |
+| `assigned_agent` | `str` | set in `_respond`; read in `_tools`/stream_conversation_turn |
+| `handoff_requested` | `bool` | set in `_tools` on escalate |
 
 ### `ConversationWorkflow` instance attributes
 
@@ -674,7 +679,7 @@ Routing: `modules/workflow/conversation_agents.py:route_to_agent`. Context: `mod
 |---|---|---|
 | `DEEPGRAM_API_KEY` | `""` | `settings`, `stt/deepgram_realtime_connector.py`, `tts/deepgram_audio_generator.py`, `voice_websocket_controller.py` |
 | `GROQ_API_KEY` | `""` | `settings` (ChatGroq uses env/provider internally) |
-| `GROQ_MODEL` | `openai/gpt-oss-20b` | `settings`, `groq_llm_assistant.py`, `conversation_workflow_graph.py` |
+| `GROQ_MODEL` | `openai/gpt-oss-20b` | `settings`, `common/usage_capturing_async_client.py`, `conversation_workflow_graph.py` |
 | `GROQ_INPUT_PRICE_PER_MILLION` | `0.075` | `settings`, `conversation_cost_tracker.py` |
 | `GROQ_CACHED_INPUT_PRICE_PER_MILLION` | `0.037` | `settings`, `conversation_cost_tracker.py` |
 | `GROQ_OUTPUT_PRICE_PER_MILLION` | `0.30` | `settings`, `conversation_cost_tracker.py` |
@@ -684,7 +689,7 @@ Routing: `modules/workflow/conversation_agents.py:route_to_agent`. Context: `mod
 | `TTS_SAMPLE_RATE` | `24000` | `settings`, `tts/deepgram_audio_generator.py`, `tts/voice_catalog.py` (SAMPLE_RATE const 24000) |
 | `BARGE_IN` | `false` | `settings`, `realtime_voice_session.py:pump_deepgram_events_to_turns` |
 | `LLM_TIMEOUT` | `20` | `settings`, `realtime_voice_session.py:AssistantTurnManager.run_assistant_turn` |
-| `LLM_MAX_TOKENS` | `512` | `settings`, `groq_llm_assistant.py`, `conversation_workflow_graph.py` |
+| `LLM_MAX_TOKENS` | `512` | `settings`, `common/usage_capturing_async_client.py`, `conversation_workflow_graph.py` |
 | `LLM_MAX_RETRIES` | `2` | `settings` (not visibly used) |
 | `DEFAULT_VOICE` | `flux-hannah-en` | `settings`, `voice_websocket_controller.py` |
 | `GREETING_TEXT` | `Thanks for calling...` | `settings`, `realtime_voice_session.py:GreetingService` |
@@ -701,15 +706,14 @@ Routing: `modules/workflow/conversation_agents.py:route_to_agent`. Context: `mod
 
 ## 8. KNOWN ISSUES
 
-- `modules/llm/groq_llm_assistant.py:GroqLlmAssistant` implements `LlmAssistant` but runtime (`RealtimeVoiceSession`) uses `ConversationWorkflow`; grep shows no caller. Likely dead/legacy code.
 - `modules/tools/fallback_appointment_repository.py:FallbackLoggingAppointmentRepository` is default in `get_default_repository`, but `modules/tools/appointment_booking_tool.py:_create_default_portal_booking_handler` overrides with `PortalAppointmentBookingRepository`; logging repo only used if someone calls `create_appointment_booking_handler()` without repository. Duplicated persistence abstraction.
 - `modules/tools/fallback_appointment_repository.py` vs `modules/tools/portal_appointment_booking_repository.py`: two appointment repositories implementing `AppointmentRepository`; overlapping booking responsibilities.
-- Tool allow-lists duplicated: `modules/workflow/conversation_agents.py:AGENT_ROLES[...].tools` and `modules/workflow/conversation_workflow_graph.py:ConversationWorkflow._execute_requested_tools` `allowed_tools` dict. Also `_generate_agent_response` filters `tool_executor.tools` by `agent.tools`.
+- Tool allow-lists duplicated: `modules/workflow/conversation_agents.py:AGENT_ROLES[...].tools` and `modules/workflow/conversation_workflow_graph.py:ConversationWorkflow._tools` `allowed_tools` dict. Also `_respond` filters `tool_executor.tools` by `agent.tools`.
 - `modules/workflow/conversation_workflow_graph.py:ConversationWorkflow._tool_limit` node is defined but not wired in `_build_graph` (no incoming edge), so unreachable.
 - `modules/portal/portal_http_client.py:CustomerPortalHttpClient.list_appointments` is defined twice (first with DTO coercion, second simpler); the second overrides the first.
 - `modules/portal/portal_http_client.py:get_services` and `get_providers` appear unused by app code (only possibly scripts).
 - `modules/portal/portal_http_client.py:aclose` appears unused.
-- `modules/llm/llm_tool_call_executor.py:LlmToolCallExecutor._validate_and_execute_booking` validates required args/confirmation, while `graph._execute_requested_tools` also validates readback/affirmative/service; overlapping booking guards.
+- `modules/llm/llm_tool_call_executor.py:LlmToolCallExecutor._validate_and_execute_booking` validates required args/confirmation, while `graph._tools` also validates readback/affirmative/service; overlapping booking guards.
 - Circular/lazy imports: `tool_executor.py` lazily imports `modules.tools`; `appointment.py` lazily imports `PortalAppointmentBookingRepository`; `tools/__init__.py` imports both. This avoids import cycles but makes registration order implicit.
 - Fixed during refactor: `AssistantTurnManager.run_assistant_turn` now calls `self._history.replace_snapshot(...)` instead of the undefined `self.history`.
 - `modules/realtime/realtime_voice_session.py:_sanitize_text_for_speech` imports `re` twice; minor.

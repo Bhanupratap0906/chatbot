@@ -59,8 +59,7 @@ class DeepgramAudioGenerator:
 
     def generate_audio_chunks(self, text: str, voice: str) -> Iterable[bytes]:
         """Blocking generator of linear16 chunks with WAV fallback."""
-        if self._cost_tracker is not None:
-            self._cost_tracker.add_tts_text(text, voice)
+        first_chunk_yielded = False
         if self._raw_pcm_supported is None:
             try:
                 response = self._request_audio_from_deepgram(text, voice, raw=True)
@@ -68,18 +67,33 @@ class DeepgramAudioGenerator:
                 first = next(iterator)
                 self._raw_pcm_supported = True
                 if first:
+                    if not first_chunk_yielded and self._cost_tracker is not None:
+                        self._cost_tracker.add_tts_text(text, voice)
+                        first_chunk_yielded = True
                     yield first
                 for chunk in iterator:
                     if chunk:
+                        if not first_chunk_yielded and self._cost_tracker is not None:
+                            self._cost_tracker.add_tts_text(text, voice)
+                            first_chunk_yielded = True
                         yield chunk
                 return
             except StopIteration:
                 self._raw_pcm_supported = True
                 return
             except Exception as error:
-                logger.warning("Deepgram rejected raw PCM, falling back to WAV: %r", error)
-                self._raw_pcm_supported = False
+                # Only fall back on validation/request errors, not after audio yielded.
+                from deepgram import DeepgramException
+                is_validation = isinstance(error, DeepgramException) or (hasattr(error, "message") and "invalid" in str(error).lower()) or (hasattr(error, "status") and error.status in (400, 422))
+                if is_validation:
+                    logger.warning("Deepgram rejected raw PCM, falling back to WAV: %r", error)
+                    self._raw_pcm_supported = False
+                else:
+                    raise
 
         for chunk in self._request_audio_from_deepgram(text, voice, raw=self._raw_pcm_supported):
             if chunk:
+                if not first_chunk_yielded and self._cost_tracker is not None:
+                    self._cost_tracker.add_tts_text(text, voice)
+                    first_chunk_yielded = True
                 yield chunk

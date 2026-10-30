@@ -10,6 +10,9 @@ and routes forward it as ``Authorization: Bearer``.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -17,8 +20,32 @@ from modules.common.settings import get_settings
 from modules.portal.portal_http_client import CustomerPortalHttpClient, get_shared_portal_http_client
 from modules.portal.portal_token_dependency import resolve_portal_token_from_request
 from modules.portal.errors import PortalApiError, PortalAuthError, PortalNetworkError
-from modules.portal.session import extract_location_id_from_jwt
-from modules.portal.token_store import portal_token_store
+
+
+# ---------- login rate limiting (5 attempts/min per IP) ----------
+# Max 256 IPs retained; entries older than 60 s are purged on access.
+_MAX_TRACKED_IPS = 256
+_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+_LOGIN_LOCK = asyncio.Lock()
+
+
+async def _check_login_rate_limit(request: Request) -> None:
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    async with _LOGIN_LOCK:
+        # Purge IPs whose last attempt is older than 60 s to cap memory use.
+        if len(_LOGIN_ATTEMPTS) >= _MAX_TRACKED_IPS:
+            stale = [
+                k for k, attempts in _LOGIN_ATTEMPTS.items()
+                if not attempts or now - attempts[-1] > 60.0
+            ]
+            for k in stale:
+                _LOGIN_ATTEMPTS.pop(k, None)
+        recent = [t for t in _LOGIN_ATTEMPTS.get(ip, []) if now - t < 60.0]
+        if len(recent) >= 5:
+            raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+        recent.append(now)
+        _LOGIN_ATTEMPTS[ip] = recent
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
@@ -38,15 +65,13 @@ def _set_portal_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=settings.portal_cookie_max_age,
         httponly=True,
-        # Lax keeps localhost cross-port flows working (mirrors the portal
-        # dev behavior); flip to strict behind HTTPS in production.
-        samesite="lax",
-        secure=False,
+        samesite=settings.cookie_samesite,
+        secure=settings.cookie_secure,
         path="/",
     )
 
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(_check_login_rate_limit)])
 async def login(
     payload: PortalLoginRequest,
     response: Response,
@@ -62,7 +87,6 @@ async def login(
     except PortalApiError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
-    portal_token_store.set(token, location_id=extract_location_id_from_jwt(token))
     _set_portal_cookie(response, token)
     return {"message": "Signed in"}
 
@@ -75,13 +99,12 @@ async def logout(
 ) -> dict:
     """Clear the local session; best-effort revoke at the portal too."""
     settings = get_settings()
-    token = request.cookies.get(settings.portal_cookie_name) or portal_token_store.get()
+    token = request.cookies.get(settings.portal_cookie_name)
     if token:
         try:
             await client.request("POST", "/admin/auth/logout", token=token)
         except PortalApiError:
             pass  # already invalid server-side — local clear is enough
-    portal_token_store.clear()
     response.delete_cookie(key=settings.portal_cookie_name, path="/")
     return {"message": "Signed out"}
 
@@ -95,14 +118,9 @@ async def me(
     try:
         envelope = await client.get_token_details(token)
     except PortalAuthError as error:
-        # Expired or revoked at the portal — drop our copy so the next
-        # request (and the frontend's /me probe) goes to /login.
-        portal_token_store.clear()
+        # Expired or revoked at the portal.
         raise HTTPException(status_code=401, detail=str(error)) from error
     except PortalApiError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
-    # Cache the active location while we have the session context.
-    data = envelope.get("data") if isinstance(envelope, dict) else None
-    portal_token_store.set_location((data or {}).get("locationId"))
     return envelope

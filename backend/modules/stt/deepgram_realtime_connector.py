@@ -15,7 +15,7 @@ from modules.common.backend_contracts import RealtimeConnector
 from modules.common.settings import get_settings
 
 
-def build_listen_build_portal_url(input_sample_rate: int) -> str:
+def build_listen_url(input_sample_rate: int) -> str:
     """Build Deepgram's streaming transcription URL; used by the connector before connecting."""
     return "wss://api.deepgram.com/v1/listen?" + urlencode(
         {
@@ -44,13 +44,17 @@ class DeepgramRealtimeConnector(RealtimeConnector):
         self._api_key = api_key if api_key is not None else settings.deepgram_api_key
         self._sample_rate = input_sample_rate if input_sample_rate is not None else settings.input_sample_rate
 
+    async def connect(self) -> Any:
+        """Connect to Deepgram realtime (ABC contract)."""
+        return await self.connect_to_deepgram_realtime()
+
     async def connect_to_deepgram_realtime(self) -> Any:
         """Connect and authenticate with Deepgram; called by the voice websocket route."""
         import websockets
 
         if not self._api_key:
             raise ValueError("DEEPGRAM_API_KEY is not configured")
-        url = build_listen_build_portal_url(self._sample_rate)
+        url = build_listen_url(self._sample_rate)
         headers = {"Authorization": f"Token {self._api_key}"}
         try:
             return await websockets.connect(url, additional_headers=headers, max_size=None)

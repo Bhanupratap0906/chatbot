@@ -86,7 +86,7 @@ def encrypt_location_id_for_portal(location_id: str) -> str:
     """Encrypt a location id the same way the portal's ``encrypt`` helper does.
 
     The ``/appointments/getAppointmentSlots`` endpoint decrypts the incoming
-    ``locationId`` with AES-256-CBC (key = sha256('my-super-secret-key')),
+    ``locationId`` with AES-256-CBC (key = sha256 of PORTAL_LOCATION_ENCRYPTION_KEY),
     so callers must send the encrypted ``iv:hex`` form.
     """
     import hashlib
@@ -94,7 +94,9 @@ def encrypt_location_id_for_portal(location_id: str) -> str:
 
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-    key = hashlib.sha256(b"my-super-secret-key").digest()
+    from modules.common.settings import get_settings
+
+    key = hashlib.sha256(get_settings().portal_location_encryption_key.encode("utf-8")).digest()
     iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
     encryptor = cipher.encryptor()
